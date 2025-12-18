@@ -1,0 +1,29 @@
+[package]
+name = "KovinWm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+tracing="0.1.41"
+smithay-drm-extras = { git = "https://github.com/Smithay/smithay.git"}
+xcursor = "0.3.10"
+
+
+[dependencies.smithay]
+version="0.7.0"
+default-features = false
+features = [
+    "wayland_frontend",
+    "desktop",
+    "backend_session_libseat",
+    "backend_drm",
+    "renderer_multi",
+    "renderer_glow",
+    "backend_gbm",
+    "backend_udev",
+    "backend_egl",
+    "backend_libinput",
+    "use_system_lib",
+]
+
