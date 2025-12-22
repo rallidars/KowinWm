@@ -37,17 +37,16 @@ impl Action {
                 std::process::Command::new(program).spawn().unwrap();
             }
             Action::Close => {
-                if let Some(active) = &state.workspaces.get_active_window() {
-                    if let Some(toplevel) = state
-                        .workspaces
-                        .get_current()
-                        .space
-                        .elements()
-                        .collect::<Vec<_>>()[*active]
-                        .toplevel()
-                    {
-                        toplevel.send_close();
-                    }
+                let under = state.surface_under().map(|w| w.0);
+                let toplevel = state
+                    .workspaces
+                    .get_current()
+                    .space
+                    .elements()
+                    .find(|w| w.wl_surface().as_deref() == under.as_ref())
+                    .and_then(|w| w.toplevel());
+                if let Some(toplevel) = toplevel {
+                    toplevel.send_close();
                 }
             }
             Action::SetActiveWorkspace(ws_id) => {
@@ -62,33 +61,36 @@ impl Action {
                 state.set_keyboard_focus_auto();
             }
             Action::ChangeFocus(direction) => {
-                state.workspaces.change_focus(direction);
+                state
+                    .workspaces
+                    .change_focus(direction, &mut state.pointer_location);
                 state.set_keyboard_focus_auto();
             }
             Action::FullScreen => {
-                let current_ws = state.workspaces.get_current();
-                let current_win = match current_ws.active_window {
-                    Some(w) => w,
-                    None => return,
-                };
-                let surface = match current_ws
-                    .space
-                    .elements()
-                    .nth(current_win)
-                    .and_then(|w| w.toplevel())
-                {
-                    Some(s) => s,
-                    None => return,
-                };
-                if surface
-                    .current_state()
-                    .states
-                    .contains(xdg_toplevel::State::Fullscreen)
-                {
-                    state.unfullscreen_request(surface.clone());
-                } else {
-                    state.fullscreen_request(surface.clone(), None);
-                }
+                //let current_ws = state.workspaces.get_current();
+                //let current_win = match current_ws.active_window {
+                //    Some(w) => w,
+                //    None => return,
+                //};
+                //let surface = match current_ws
+                //    .space
+                //    .elements()
+                //    .nth(current_win)
+                //    .and_then(|w| w.toplevel())
+                //{
+                //    Some(s) => s,
+                //    None => return,
+                //};
+                //if surface
+                //    .current_state()
+                //    .states
+                //    .contains(xdg_toplevel::State::Fullscreen)
+                //{
+                //    state.unfullscreen_request(surface.clone());
+                //} else {
+                //    state.fullscreen_request(surface.clone(), None);
+                //}
+                //state.workspaces.layout();
             }
         };
     }

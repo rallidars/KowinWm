@@ -155,7 +155,7 @@ impl<BackendData: Backend + 'static> State<BackendData> {
 
                 ptr.motion(
                     self,
-                    under.clone(), // (Option<(WlSurface, Point<f64, Logical>)>)
+                    under, // (Option<(WlSurface, Point<f64, Logical>)>)
                     &MotionEvent {
                         location: self.pointer_location,
                         serial,

@@ -16,6 +16,7 @@ use smithay::{
     utils::{Logical, Point, Serial, SerialCounter},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
+        seat::WaylandFocus,
         selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
         shell::{
             wlr_layer::{self, WlrLayerShellState},
@@ -146,22 +147,13 @@ impl<BackendData: Backend + 'static> State<BackendData> {
         smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
         Point<f64, Logical>,
     )> {
-        let output = self
-            .workspaces
-            .get_current()
-            .space
-            .outputs()
-            .next()
-            .unwrap()
-            .clone();
-
-        let output_geo = self
-            .workspaces
-            .get_current()
-            .space
-            .output_geometry(&output)
-            .unwrap();
         let pos = self.pointer_location;
+        let space = &self.workspaces.get_current().space;
+        let output = space.outputs().find(|o| {
+            let geometry = space.output_geometry(o).unwrap();
+            geometry.contains(pos.to_i32_round())
+        })?;
+        let output_geo = space.output_geometry(output).unwrap();
 
         let mut under = None;
         let layers = layer_map_for_output(&output);
@@ -170,10 +162,31 @@ impl<BackendData: Backend + 'static> State<BackendData> {
         if let Some(layer) = layers
             .layer_under(wlr_layer::Layer::Overlay, pos)
             .or_else(|| layers.layer_under(wlr_layer::Layer::Top, pos))
-            .or_else(|| layers.layer_under(wlr_layer::Layer::Bottom, pos))
+        {
+            let layer_loc = layers.layer_geometry(layer).unwrap().loc;
+
+            // Relative position within the layer surface
+            let relative_pos = pos - layer_loc.to_f64();
+
+            // Find the actual wl_surface (and its local pos) under the relative position
+            if let Some((surface, surface_loc)) =
+                layer.surface_under(relative_pos, WindowSurfaceType::ALL)
+            {
+                under = Some((
+                    surface,
+                    (surface_loc + layer_loc).to_f64() + output_geo.loc.to_f64(),
+                ));
+            }
+        } else if let Some(focus) = space.element_under(pos).and_then(|(window, loc)| {
+            window
+                .surface_under(pos - loc.to_f64(), WindowSurfaceType::ALL)
+                .map(|(surface, surf_loc)| (surface, surf_loc + loc))
+        }) {
+            under = Some((focus.0, focus.1.to_f64()));
+        } else if let Some(layer) = layers
+            .layer_under(wlr_layer::Layer::Bottom, pos)
             .or_else(|| layers.layer_under(wlr_layer::Layer::Background, pos))
         {
-            // Get the position of this specific layer surface on the output
             let layer_loc = layers.layer_geometry(layer).unwrap().loc;
 
             // Relative position within the layer surface
@@ -190,30 +203,27 @@ impl<BackendData: Backend + 'static> State<BackendData> {
             }
         }
 
-        if under.is_none() {
-            let space = &self.workspaces.get_current().space;
-            if let Some((window, window_loc)) = space.element_under(pos) {
-                if let Some((surface, surface_loc)) = window.surface_under(
-                    pos - window_loc.to_f64(), // relative to window
-                    WindowSurfaceType::ALL,
-                ) {
-                    under = Some((surface, (surface_loc + window_loc).to_f64()));
-                }
-            }
-        }
         under
     }
 
     pub fn set_keyboard_focus(&mut self, surface: Option<WlSurface>) {
         if let Some(keyboard) = self.seat.get_keyboard() {
-            keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
+            let serial = SERIAL_COUNTER.next_serial();
+            keyboard.set_focus(self, surface, serial);
         }
     }
 
     pub fn set_keyboard_focus_auto(&mut self) {
-        let under = self.surface_under();
-
-        self.set_keyboard_focus(under.map(|s| s.0));
+        if let Some(under) = self.surface_under().map(|s| s.0) {
+            let active = self
+                .workspaces
+                .get_current()
+                .space
+                .elements()
+                .find(|w| w.wl_surface().map(|s| *s == under).unwrap_or(false));
+            self.workspaces.set_active_window(active.cloned());
+            self.set_keyboard_focus(Some(under));
+        }
     }
 }
 

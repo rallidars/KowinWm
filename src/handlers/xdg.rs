@@ -4,7 +4,8 @@ use smithay::{
     input::Seat,
     output::Output,
     reexports::{
-        wayland_protocols::xdg::shell::server::xdg_toplevel, wayland_server::protocol::wl_seat,
+        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        wayland_server::{protocol::wl_seat, Resource},
     },
     utils::Serial,
     wayland::{
@@ -39,7 +40,6 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
                     .unwrap()
                     .clone(),
             );
-
         let geo = self.workspaces.get_current().space.output_geometry(&output);
         let size = geo.and_then(|g| Some(g.size));
         surface.with_pending_state(|state| {
@@ -60,9 +60,8 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        self.set_keyboard_focus(Some(surface.wl_surface().clone()));
         let window = Window::new_wayland_window(surface);
-        self.workspaces.insert_window(window);
+        self.workspaces.insert_window(window.clone());
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -75,9 +74,15 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        let window = Window::new_wayland_window(surface);
-        self.workspaces.remove_active_window(window);
-        self.set_keyboard_focus_auto();
+        let window = self
+            .workspaces
+            .get_current()
+            .space
+            .elements()
+            .find(|w| w.toplevel().unwrap() == &surface)
+            .unwrap()
+            .clone();
+        self.workspaces.remove_window(&window);
     }
 
     fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
