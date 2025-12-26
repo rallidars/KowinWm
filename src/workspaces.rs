@@ -98,67 +98,48 @@ impl Workspaces {
     pub fn change_focus(&mut self, direction: &Direction, loc: &mut Point<f64, Logical>) {
         let space = &self.get_current().space;
 
-        let focused = match self.get_active_window() {
-            Some(w) => w,
-            None => return,
-        };
-
-        let focused_geo = match space.element_geometry(&focused) {
-            Some(g) => g,
-            None => return,
-        };
-
-        let focused_center: Point<i32, Kind> = Point::from((
-            focused_geo.loc.x + focused_geo.size.w / 2,
-            focused_geo.loc.y + focused_geo.size.h / 2,
-        ));
-
-        let mut best: Option<(Window, i32)> = None;
-
-        for window in space.elements() {
-            if window == &focused {
-                continue;
-            }
-
-            let geo = match space.element_geometry(window) {
-                Some(g) => g,
-                None => continue,
-            };
-
-            let center: Point<i32, Kind> =
-                Point::from((geo.loc.x + geo.size.w / 2, geo.loc.y + geo.size.h / 2));
-
-            let dx = center.x - focused_center.x;
-            let dy = center.y - focused_center.y;
-
-            let valid = match direction {
-                Direction::Left => dx < 0 && dy.abs() < geo.size.h,
-                Direction::Right => dx > 0 && dy.abs() < geo.size.h,
-                Direction::Top => dy < 0 && dx.abs() < geo.size.w,
-                Direction::Down => dy > 0 && dx.abs() < geo.size.w,
-            };
-
-            if !valid {
-                continue;
-            }
-
-            let distance = dx.abs() + dy.abs();
-
-            match best {
-                None => best = Some((window.clone(), distance)),
-                Some((_, best_dist)) if distance < best_dist => {
-                    best = Some((window.clone(), distance))
-                }
-                _ => {}
-            }
-        }
-
-        if let Some((window, _)) = best {
+        let focused = self.get_active_window();
+        if let Some((window, _)) = best_window(direction, space, focused) {
             *loc = window_center(&space, &window).unwrap();
         }
     }
 
-    pub fn move_window(&mut self, direction: &Direction) {}
+    pub fn move_window(&mut self, direction: &Direction, loc: &mut Point<f64, Logical>) {
+        let space = &self.get_current().space;
+        let Some(focused) = self.get_active_window() else {
+            return;
+        };
+
+        // Find the best window to swap with
+        let Some((best, _)) = best_window(direction, space, Some(focused.clone())) else {
+            return;
+        };
+
+        // Avoid pointless work if same window
+        if best == focused {
+            return;
+        }
+
+        let mut windows = space.elements().map(|w| w.clone()).collect::<Vec<Window>>();
+        let focused_pos = match windows.iter().position(|w| w == &focused) {
+            Some(pos) => pos,
+            None => return,
+        };
+        let best_pos = match windows.iter().position(|w| w == &best) {
+            Some(w) => w,
+            None => return,
+        };
+        windows.swap(focused_pos, best_pos);
+        let space = &mut self.get_current_mut().space;
+        *loc = window_center(&space, &best).unwrap();
+        for window in windows {
+            space.map_element(window, (0, 0), false);
+        }
+
+        self.layout();
+    }
+
+    pub fn render_elements() {}
 
     pub fn layout(&mut self) {
         let space = &mut self.get_current_mut().space;
@@ -179,17 +160,10 @@ impl Workspaces {
         if count == 0 {
             return;
         }
-        //if let Some(window) = is_fullscreen(elements.iter()) {
-        //    if let Some(toplevel) = window.toplevel() {
-        //        toplevel.with_pending_state(|state| {
-        //            state.size = Some((output_width, output_height).into());
-        //        });
-        //        toplevel.send_pending_configure();
-        //    }
 
-        //    space.map_element(window.clone(), (0, 0), false);
-        //    return;
-        //}
+        if let Some(_fs) = is_fullscreen(elements.iter()) {
+            return;
+        }
 
         let half_width = output_width / 2;
         let vertical_height = if count > 1 {
@@ -223,19 +197,23 @@ impl Workspaces {
         }
     }
 }
-pub fn is_fullscreen<'a, T>(mut windows: T) -> Option<&'a Window>
+
+pub fn is_fullscreen<'a, I>(elements: I) -> Option<&'a Window>
 where
-    T: Iterator<Item = &'a Window>,
+    I: Iterator<Item = &'a Window>,
 {
-    windows.find(|w| {
-        w.toplevel()
-            .map(|t| {
-                t.current_state()
-                    .states
-                    .contains(xdg_toplevel::State::Fullscreen)
-            })
-            .unwrap_or(false)
-    })
+    for element in elements {
+        if element
+            .toplevel()
+            .unwrap()
+            .current_state()
+            .states
+            .contains(xdg_toplevel::State::Fullscreen)
+        {
+            return Some(element);
+        }
+    }
+    None
 }
 
 pub fn window_center(space: &Space<Window>, window: &Window) -> Option<Point<f64, Logical>> {
@@ -245,4 +223,56 @@ pub fn window_center(space: &Space<Window>, window: &Window) -> Option<Point<f64
         (geo.loc.x + geo.size.w / 2) as f64,
         (geo.loc.y + geo.size.h / 2) as f64,
     )))
+}
+pub fn best_window(
+    direction: &Direction,
+    space: &Space<Window>,
+    focused: Option<Window>,
+) -> Option<(Window, i32)> {
+    let focused = focused?;
+    let focused_geo = space.element_geometry(&focused)?;
+
+    let focused_center: Point<i32, Kind> = Point::from((
+        focused_geo.loc.x + focused_geo.size.w / 2,
+        focused_geo.loc.y + focused_geo.size.h / 2,
+    ));
+
+    let mut best: Option<(Window, i32)> = None;
+
+    for window in space.elements() {
+        if window == &focused {
+            continue;
+        }
+
+        let geo = match space.element_geometry(window) {
+            Some(g) => g,
+            None => continue,
+        };
+
+        let center: Point<i32, Kind> =
+            Point::from((geo.loc.x + geo.size.w / 2, geo.loc.y + geo.size.h / 2));
+
+        let dx = center.x - focused_center.x;
+        let dy = center.y - focused_center.y;
+
+        let valid = match direction {
+            Direction::Left => dx < 0 && dy.abs() < geo.size.h,
+            Direction::Right => dx > 0 && dy.abs() < geo.size.h,
+            Direction::Top => dy < 0 && dx.abs() < geo.size.w,
+            Direction::Down => dy > 0 && dx.abs() < geo.size.w,
+        };
+
+        if !valid {
+            continue;
+        }
+
+        let distance = dx.abs() + dy.abs();
+
+        match best {
+            None => best = Some((window.clone(), distance)),
+            Some((_, best_dist)) if distance < best_dist => best = Some((window.clone(), distance)),
+            _ => {}
+        }
+    }
+    best
 }

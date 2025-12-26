@@ -1,11 +1,8 @@
-use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
-use smithay::reexports::wayland_server::Resource;
-use smithay::wayland::compositor::with_states;
 use smithay::wayland::seat::WaylandFocus;
-use smithay::wayland::shell::xdg::ToplevelSurface;
-use smithay::{desktop::Window, wayland::shell::xdg::XdgShellHandler};
+use smithay::wayland::shell::xdg::XdgShellHandler;
 
 use crate::state::{Backend, State};
+use crate::workspaces::is_fullscreen;
 
 #[derive(PartialEq)]
 pub enum Action {
@@ -57,7 +54,9 @@ impl Action {
                 state.workspaces.move_window_to_ws(*ws_index);
             }
             Action::MoveWindow(direction) => {
-                state.workspaces.move_window(direction);
+                state
+                    .workspaces
+                    .move_window(direction, &mut state.pointer_location);
                 state.set_keyboard_focus_auto();
             }
             Action::ChangeFocus(direction) => {
@@ -67,30 +66,19 @@ impl Action {
                 state.set_keyboard_focus_auto();
             }
             Action::FullScreen => {
-                //let current_ws = state.workspaces.get_current();
-                //let current_win = match current_ws.active_window {
-                //    Some(w) => w,
-                //    None => return,
-                //};
-                //let surface = match current_ws
-                //    .space
-                //    .elements()
-                //    .nth(current_win)
-                //    .and_then(|w| w.toplevel())
-                //{
-                //    Some(s) => s,
-                //    None => return,
-                //};
-                //if surface
-                //    .current_state()
-                //    .states
-                //    .contains(xdg_toplevel::State::Fullscreen)
-                //{
-                //    state.unfullscreen_request(surface.clone());
-                //} else {
-                //    state.fullscreen_request(surface.clone(), None);
-                //}
-                //state.workspaces.layout();
+                let acitve_window = match &state.workspaces.get_current().active_window {
+                    Some(active) => active,
+                    None => return,
+                };
+                let elements = state.workspaces.get_current().space.elements();
+                if let Some(fullscreen) = is_fullscreen(elements) {
+                    //if fullscreen == acitve_window {
+                    //    state.unfullscreen_request(acitve_window.toplevel().unwrap().clone());
+                    //}
+                    state.unfullscreen_request(fullscreen.toplevel().unwrap().clone());
+                } else {
+                    state.fullscreen_request(acitve_window.toplevel().unwrap().clone(), None);
+                }
             }
         };
     }

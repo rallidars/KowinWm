@@ -40,11 +40,19 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
                     .unwrap()
                     .clone(),
             );
-        let geo = self.workspaces.get_current().space.output_geometry(&output);
-        let size = geo.and_then(|g| Some(g.size));
+        let space = &mut self.workspaces.get_current_mut().space;
+
+        let window = space
+            .elements()
+            .find(|w| w.toplevel().map(|s| s == &surface).unwrap_or(false))
+            .cloned()
+            .unwrap();
+
+        space.map_element(window.clone(), (0, 0), false);
+        let geo = space.output_geometry(&output).unwrap();
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Fullscreen);
-            state.size = size;
+            state.size = Some(geo.size);
             state.fullscreen_output = wl_output;
         });
         surface.send_configure();
@@ -107,6 +115,7 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
 
         surface.send_repositioned(token);
     }
+    fn popup_destroyed(&mut self, surface: PopupSurface) {}
 }
 
 delegate_xdg_shell!(@<BackendData: Backend + 'static> State<BackendData>);

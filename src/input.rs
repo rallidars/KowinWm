@@ -148,16 +148,38 @@ impl<BackendData: Backend + 'static> State<BackendData> {
                 }
             }
             InputEvent::PointerMotionAbsolute { event } => {
+                let output = self
+                    .workspaces
+                    .get_current()
+                    .space
+                    .outputs()
+                    .next()
+                    .unwrap()
+                    .clone();
+
+                let output_geo = self
+                    .workspaces
+                    .get_current()
+                    .space
+                    .output_geometry(&output)
+                    .unwrap();
+
+                let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
+
                 let serial = SERIAL_COUNTER.next_serial();
 
-                let under = self.surface_under();
                 let ptr = self.seat.get_pointer().unwrap();
+
+                self.pointer_location = self.clamp_coords(pos);
+
+                let under = self.surface_under();
+                self.set_keyboard_focus_auto();
 
                 ptr.motion(
                     self,
                     under, // (Option<(WlSurface, Point<f64, Logical>)>)
                     &MotionEvent {
-                        location: self.pointer_location,
+                        location: pos,
                         serial,
                         time: event.time_msec(),
                     },

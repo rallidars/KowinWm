@@ -129,8 +129,6 @@ pub fn handle_commit(space: &Space<Window>, surface: &WlSurface, popup_manager: 
         if !popup.is_initial_configure_sent() {
             popup.send_configure().expect("initial configure failed");
         }
-
-        return;
     };
 }
 

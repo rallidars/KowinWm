@@ -21,6 +21,7 @@ impl BorderShader {
         geo: Rectangle<i32, Logical>,
         alpha: f32,
         border_color: u32,
+        border_thickness: f32,
     ) -> PixelShaderElement {
         let program = renderer
             .egl_context()

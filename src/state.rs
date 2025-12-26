@@ -27,8 +27,8 @@ use smithay::{
     },
 };
 
-use crate::workspaces::Workspaces;
 use crate::SERIAL_COUNTER;
+use crate::{config::Config, workspaces::Workspaces};
 
 pub struct CalloopData<BackendData: Backend + 'static> {
     pub state: State<BackendData>,
@@ -39,7 +39,22 @@ pub trait Backend {
     fn seat_name(&self) -> String;
 }
 
+//        let best_loc = space.element_location(&best).unwrap();
+//        let focused_loc = space.element_location(&focused.clone().unwrap()).unwrap();
+//        let space = &mut self.get_current_mut().space;
+//        for window in windows {
+//            if window == best {
+//                space.map_element(window, focused_loc, false);
+//            } else if window == focused.clone().unwrap() {
+//                space.map_element(window, best_loc, false);
+//            } else {
+//                let loc = space.element_location(&window).unwrap();
+//                space.map_element(window, loc, false);
+//            };
+//        }
+
 pub struct State<BackendData: Backend + 'static> {
+    pub config: Config,
     pub backend_data: BackendData,
     pub loop_handle: LoopHandle<'static, CalloopData<BackendData>>,
     pub workspaces: Workspaces,
@@ -119,6 +134,7 @@ impl<BackendData: Backend + 'static> State<BackendData> {
             .expect("Failed to init wayland server source");
 
         Self {
+            config: Config::get_config().unwrap_or_default(),
             pointer_location: (0.0, 0.0).into(),
             pointer,
             backend_data,
@@ -177,12 +193,10 @@ impl<BackendData: Backend + 'static> State<BackendData> {
                     (surface_loc + layer_loc).to_f64() + output_geo.loc.to_f64(),
                 ));
             }
-        } else if let Some(focus) = space.element_under(pos).and_then(|(window, loc)| {
-            window
-                .surface_under(pos - loc.to_f64(), WindowSurfaceType::ALL)
-                .map(|(surface, surf_loc)| (surface, surf_loc + loc))
-        }) {
-            under = Some((focus.0, focus.1.to_f64()));
+        } else if let Some((window, loc)) = space.element_under(pos) {
+            under = window
+                .wl_surface()
+                .map(|s| (s.as_ref().clone(), loc.to_f64()));
         } else if let Some(layer) = layers
             .layer_under(wlr_layer::Layer::Bottom, pos)
             .or_else(|| layers.layer_under(wlr_layer::Layer::Background, pos))

@@ -518,7 +518,7 @@ impl State<UdevData> {
                     planes.overlay = vec![];
                 }
                 let framebuffer_exporter =
-                    GbmFramebufferExporter::new(device.gbm.clone(), Some(node));
+                    GbmFramebufferExporter::new(device.gbm.clone(), Some(node).into());
 
                 let compositor = DrmCompositor::new(
                     &output,
@@ -661,7 +661,13 @@ impl State<UdevData> {
 
             let geo = current_space.element_geometry(window).unwrap();
 
-            let border = BorderShader::element(renderer.as_mut(), geo, 1.0, 0x222222);
+            let border = BorderShader::element(
+                renderer.as_mut(),
+                geo,
+                1.0,
+                self.config.border_acitve_color(),
+                2.0,
+            );
 
             renderelements.push(CustomRenderElements::Shader(border));
 
