@@ -6,7 +6,7 @@ use smithay::{
     wayland::{seat::WaylandFocus, shell::xdg::ToplevelSurface},
 };
 
-use crate::action::Direction;
+use crate::{action::Direction, config::Config, render::CustomRenderElements};
 
 pub struct Workspace {
     pub space: Space<Window>,
@@ -139,9 +139,8 @@ impl Workspaces {
         self.layout();
     }
 
-    pub fn render_elements() {}
-
     pub fn layout(&mut self) {
+        let gap = 2;
         let space = &mut self.get_current_mut().space;
         space.refresh();
 
@@ -188,7 +187,7 @@ impl Workspaces {
 
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| {
-                    state.size = Some((width, height).into());
+                    state.size = Some((width - gap, height - gap).into());
                 });
                 toplevel.send_pending_configure();
             }

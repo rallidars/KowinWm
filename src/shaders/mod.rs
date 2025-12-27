@@ -37,8 +37,6 @@ impl BorderShader {
         let green = border_color >> 8 & 255;
         let blue = border_color & 255;
 
-        let border_thickness = 2.0;
-
         PixelShaderElement::new(
             program,
             geo,

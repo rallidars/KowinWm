@@ -39,20 +39,6 @@ pub trait Backend {
     fn seat_name(&self) -> String;
 }
 
-//        let best_loc = space.element_location(&best).unwrap();
-//        let focused_loc = space.element_location(&focused.clone().unwrap()).unwrap();
-//        let space = &mut self.get_current_mut().space;
-//        for window in windows {
-//            if window == best {
-//                space.map_element(window, focused_loc, false);
-//            } else if window == focused.clone().unwrap() {
-//                space.map_element(window, best_loc, false);
-//            } else {
-//                let loc = space.element_location(&window).unwrap();
-//                space.map_element(window, loc, false);
-//            };
-//        }
-
 pub struct State<BackendData: Backend + 'static> {
     pub config: Config,
     pub backend_data: BackendData,

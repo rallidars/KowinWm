@@ -656,20 +656,24 @@ impl State<UdevData> {
                 }),
         );
 
+        let active_window = &self.workspaces.get_current().active_window;
+        let thickness = self.config.border.thickness;
         for window in current_space.elements() {
-            let location = current_space.element_location(window).unwrap() - window.geometry().loc;
-
             let geo = current_space.element_geometry(window).unwrap();
 
-            let border = BorderShader::element(
-                renderer.as_mut(),
-                geo,
-                1.0,
-                self.config.border_acitve_color(),
-                2.0,
-            );
+            //geo.loc += (self.config.border.thickness, self.config.border.thickness).into();
+
+            let color = if Some(window) == active_window.as_ref() {
+                self.config.border.active
+            } else {
+                self.config.border.inactive
+            };
+
+            let border =
+                BorderShader::element(renderer.as_mut(), geo, 1.0, color, thickness as f32);
 
             renderelements.push(CustomRenderElements::Shader(border));
+            let location = geo.loc - window.geometry().loc;
 
             renderelements.extend(
                 window
