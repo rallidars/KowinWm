@@ -164,6 +164,11 @@ impl<BackendData: Backend + 'static> State<BackendData> {
         if let Some(layer) = layers
             .layer_under(wlr_layer::Layer::Overlay, pos)
             .or_else(|| layers.layer_under(wlr_layer::Layer::Top, pos))
+            .or_else(|| {
+                layers.layers().find(|l| {
+                    l.layer() == wlr_layer::Layer::Overlay || l.layer() == wlr_layer::Layer::Top
+                })
+            })
         {
             let layer_loc = layers.layer_geometry(layer).unwrap().loc;
 
@@ -218,8 +223,8 @@ impl<BackendData: Backend + 'static> State<BackendData> {
             let active = self
                 .workspaces
                 .get_current()
-                .space
-                .elements()
+                .layout
+                .iter()
                 .find(|w| w.wl_surface().map(|s| *s == under).unwrap_or(false));
             self.workspaces.set_active_window(active.cloned());
             self.set_keyboard_focus(Some(under));

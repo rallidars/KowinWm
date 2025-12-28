@@ -40,13 +40,15 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
                     .unwrap()
                     .clone(),
             );
-        let space = &mut self.workspaces.get_current_mut().space;
+        let ws = &mut self.workspaces.get_current_mut();
+        let space = &mut ws.space;
 
         let window = space
             .elements()
             .find(|w| w.toplevel().map(|s| s == &surface).unwrap_or(false))
             .cloned()
             .unwrap();
+        ws.full_geo = space.element_geometry(&window);
 
         space.map_element(window.clone(), (0, 0), false);
         let geo = space.output_geometry(&output).unwrap();
@@ -59,17 +61,28 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        let ws = &mut self.workspaces.get_current_mut();
+        let space = &mut ws.space;
+        let window = space
+            .elements()
+            .find(|w| w.toplevel().map(|s| s == &surface).unwrap_or(false))
+            .cloned()
+            .unwrap();
         surface.with_pending_state(|state| {
             state.states.unset(xdg_toplevel::State::Fullscreen);
-            state.size = None;
+            state.size = ws.full_geo.map(|w| w.size);
             state.fullscreen_output.take()
         });
+        space.map_element(window, ws.full_geo.unwrap().loc, false);
+        self.workspaces.get_current_mut().full_geo = None;
         surface.send_configure();
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let window = Window::new_wayland_window(surface);
         self.workspaces.insert_window(window.clone());
+        self.workspaces.layout();
+        self.set_keyboard_focus_auto();
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -85,12 +98,14 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
         let window = self
             .workspaces
             .get_current()
-            .space
-            .elements()
+            .layout
+            .iter()
             .find(|w| w.toplevel().unwrap() == &surface)
             .unwrap()
             .clone();
         self.workspaces.remove_window(&window);
+        self.workspaces.layout();
+        self.set_keyboard_focus_auto();
     }
 
     fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
@@ -115,7 +130,6 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
 
         surface.send_repositioned(token);
     }
-    fn popup_destroyed(&mut self, surface: PopupSurface) {}
 }
 
 delegate_xdg_shell!(@<BackendData: Backend + 'static> State<BackendData>);

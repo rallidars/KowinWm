@@ -38,8 +38,8 @@ impl Action {
                 let toplevel = state
                     .workspaces
                     .get_current()
-                    .space
-                    .elements()
+                    .layout
+                    .iter()
                     .find(|w| w.wl_surface().as_deref() == under.as_ref())
                     .and_then(|w| w.toplevel());
                 if let Some(toplevel) = toplevel {
@@ -48,15 +48,19 @@ impl Action {
             }
             Action::SetActiveWorkspace(ws_id) => {
                 state.workspaces.set_active_workspace(*ws_id);
+                state.workspaces.layout();
                 state.set_keyboard_focus_auto();
             }
             Action::MoveWindowToWorkspace(ws_index) => {
                 state.workspaces.move_window_to_ws(*ws_index);
+                state.workspaces.layout();
+                state.set_keyboard_focus_auto();
             }
             Action::MoveWindow(direction) => {
                 state
                     .workspaces
                     .move_window(direction, &mut state.pointer_location);
+                state.workspaces.layout();
                 state.set_keyboard_focus_auto();
             }
             Action::ChangeFocus(direction) => {
@@ -70,7 +74,7 @@ impl Action {
                     Some(active) => active,
                     None => return,
                 };
-                let elements = state.workspaces.get_current().space.elements();
+                let elements = state.workspaces.get_current().layout.iter();
                 if let Some(fullscreen) = is_fullscreen(elements) {
                     //if fullscreen == acitve_window {
                     //    state.unfullscreen_request(acitve_window.toplevel().unwrap().clone());

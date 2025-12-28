@@ -19,7 +19,7 @@ impl Default for Config {
             border: Border {
                 thickness: 2,
                 gap: 10,
-                active: 0x522D00,
+                active: 0x8B4000,
                 inactive: 0x2A2A2A,
             },
         }

@@ -4,6 +4,7 @@ use crate::{
     render::CustomRenderElements,
     shaders::{compile_shaders, BorderShader},
     state::{Backend, CalloopData, State},
+    workspaces::is_fullscreen,
 };
 use smithay::{
     backend::{
@@ -611,7 +612,8 @@ impl State<UdevData> {
             .gpus
             .single_renderer(&device.render_node)
             .unwrap();
-        let current_space = &self.workspaces.get_current().space;
+        let ws = self.workspaces.get_current();
+        let current_space = &ws.space;
         let output = current_space.outputs().next().unwrap();
 
         let mut renderelements: Vec<CustomRenderElements<_>> = vec![];
@@ -656,31 +658,42 @@ impl State<UdevData> {
                 }),
         );
 
-        let active_window = &self.workspaces.get_current().active_window;
+        let active_window = &ws.active_window;
         let thickness = self.config.border.thickness;
-        for window in current_space.elements() {
-            let geo = current_space.element_geometry(window).unwrap();
-
-            //geo.loc += (self.config.border.thickness, self.config.border.thickness).into();
-
-            let color = if Some(window) == active_window.as_ref() {
-                self.config.border.active
-            } else {
-                self.config.border.inactive
-            };
-
-            let border =
-                BorderShader::element(renderer.as_mut(), geo, 1.0, color, thickness as f32);
-
-            renderelements.push(CustomRenderElements::Shader(border));
-            let location = geo.loc - window.geometry().loc;
-
+        let is_full = is_fullscreen(self.workspaces.get_current().space.elements());
+        if let Some(win) = is_full {
+            let location = current_space.element_location(win).unwrap();
             renderelements.extend(
-                window
-                    .render_elements(&mut renderer, location.to_physical(1), scale, 1.0)
+                win.render_elements(&mut renderer, location.to_physical(1), scale, 1.0)
                     .into_iter()
                     .map(CustomRenderElements::Window),
             );
+        } else {
+            for window in ws.space.elements() {
+                let mut geo = current_space.element_geometry(&window).unwrap();
+                //geo.size = (self.config.border.thickness, self.config.border.thickness).into();
+
+                //geo.loc += (self.config.border.thickness, self.config.border.thickness).into();
+
+                let color = if Some(window) == active_window.as_ref() {
+                    self.config.border.active
+                } else {
+                    self.config.border.inactive
+                };
+
+                let border =
+                    BorderShader::element(renderer.as_mut(), geo, 1.0, color, thickness as f32);
+
+                renderelements.push(CustomRenderElements::Shader(border));
+                let location = geo.loc - window.geometry().loc;
+
+                renderelements.extend(
+                    window
+                        .render_elements(&mut renderer, location.to_physical(1), scale, 1.0)
+                        .into_iter()
+                        .map(CustomRenderElements::Window),
+                );
+            }
         }
 
         renderelements.extend(

@@ -1,15 +1,22 @@
 use smithay::{
-    backend::renderer::element::Kind,
+    backend::renderer::{
+        element::{AsRenderElements, Kind},
+        ImportAll, Renderer,
+    },
     desktop::{layer_map_for_output, space::SpaceElement, Space, Window},
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
-    utils::{Logical, Point},
+    utils::{Logical, Point, Rectangle, Size},
     wayland::{seat::WaylandFocus, shell::xdg::ToplevelSurface},
 };
 
-use crate::{action::Direction, config::Config, render::CustomRenderElements};
+use crate::{
+    action::Direction, config::Config, render::CustomRenderElements, shaders::BorderShader,
+};
 
 pub struct Workspace {
     pub space: Space<Window>,
+    pub full_geo: Option<Rectangle<i32, Logical>>,
+    pub layout: Vec<Window>,
     pub active_window: Option<Window>,
     pub prev_window: Option<Window>,
 }
@@ -18,6 +25,8 @@ impl Workspace {
     pub fn new() -> Self {
         Self {
             space: Space::default(),
+            full_geo: None,
+            layout: vec![],
             active_window: None,
             prev_window: None,
         }
@@ -69,7 +78,6 @@ impl Workspaces {
         }
         self.prev_workspace = self.active_workspace;
         self.active_workspace = workspace;
-        self.layout();
     }
 
     pub fn move_window_to_ws(&mut self, ws_index: usize) {
@@ -78,21 +86,42 @@ impl Workspaces {
             None => return,
         };
 
-        self.get_current_mut().space.unmap_elem(&active);
+        let ws = self.get_current_mut();
+        let mut removed = None;
+        ws.layout.retain(|w| {
+            if w == &active {
+                removed = Some(w.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(r) = removed {
+            ws.space.unmap_elem(&r);
+        }
         self.set_active_workspace(ws_index);
         self.insert_window(active.clone());
     }
 
     pub fn remove_window(&mut self, surface: &Window) {
-        self.get_current_mut().space.unmap_elem(surface);
-        self.layout();
+        let ws = self.get_current_mut();
+        let mut removed = None;
+        ws.layout.retain(|w| {
+            if w == surface {
+                removed = Some(w.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(r) = removed {
+            ws.space.unmap_elem(&r);
+        }
     }
 
     pub fn insert_window(&mut self, window: Window) {
-        self.get_current_mut()
-            .space
-            .map_element(window.clone(), (0, 0), false);
-        self.layout();
+        let ws = self.get_current_mut();
+        ws.layout.push(window);
     }
 
     pub fn change_focus(&mut self, direction: &Direction, loc: &mut Point<f64, Logical>) {
@@ -105,13 +134,13 @@ impl Workspaces {
     }
 
     pub fn move_window(&mut self, direction: &Direction, loc: &mut Point<f64, Logical>) {
-        let space = &self.get_current().space;
+        let ws = self.get_current();
         let Some(focused) = self.get_active_window() else {
             return;
         };
 
         // Find the best window to swap with
-        let Some((best, _)) = best_window(direction, space, Some(focused.clone())) else {
+        let Some((best, _)) = best_window(direction, &ws.space, Some(focused.clone())) else {
             return;
         };
 
@@ -120,28 +149,23 @@ impl Workspaces {
             return;
         }
 
-        let mut windows = space.elements().map(|w| w.clone()).collect::<Vec<Window>>();
-        let focused_pos = match windows.iter().position(|w| w == &focused) {
+        let focused_pos = match ws.layout.iter().position(|w| w == &focused) {
             Some(pos) => pos,
             None => return,
         };
-        let best_pos = match windows.iter().position(|w| w == &best) {
+        let best_pos = match ws.layout.iter().position(|w| w == &best) {
             Some(w) => w,
             None => return,
         };
-        windows.swap(focused_pos, best_pos);
-        let space = &mut self.get_current_mut().space;
-        *loc = window_center(&space, &best).unwrap();
-        for window in windows {
-            space.map_element(window, (0, 0), false);
-        }
-
-        self.layout();
+        *loc = window_center(&ws.space, &best).unwrap();
+        self.get_current_mut().layout.swap(focused_pos, best_pos);
     }
 
+    fn render_elements(&self) {}
+
     pub fn layout(&mut self) {
-        let gap = 2;
-        let space = &mut self.get_current_mut().space;
+        let ws = &mut self.get_current_mut();
+        let space = &mut ws.space;
         space.refresh();
 
         let output = match space.outputs().next() {
@@ -153,14 +177,13 @@ impl Workspaces {
         let output_width = geo.size.w;
         let output_height = geo.size.h;
 
-        let elements: Vec<_> = space.elements().map(|e| e.clone()).collect();
-        let count = elements.len() as i32;
+        let count = ws.layout.len() as i32;
 
         if count == 0 {
             return;
         }
 
-        if let Some(_fs) = is_fullscreen(elements.iter()) {
+        if let Some(_fs) = is_fullscreen(ws.layout.iter()) {
             return;
         }
 
@@ -171,7 +194,7 @@ impl Workspaces {
             output_height
         };
 
-        for (i, window) in elements.into_iter().enumerate() {
+        for (i, window) in ws.layout.iter().enumerate() {
             let (mut x, mut y) = (0, 0);
             let (mut width, mut height) = (output_width, output_height);
 
@@ -187,12 +210,12 @@ impl Workspaces {
 
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| {
-                    state.size = Some((width - gap, height - gap).into());
+                    state.size = Some((width, height).into());
                 });
-                toplevel.send_pending_configure();
+                toplevel.send_configure();
             }
 
-            space.map_element(window, (x, y), false);
+            space.map_element(window.clone(), (x, y), false);
         }
     }
 }
