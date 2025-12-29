@@ -31,27 +31,19 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
         let output = wl_output
             .clone()
             .and_then(|o| Output::from_resource(&o))
-            .unwrap_or(
-                self.workspaces
-                    .get_current()
-                    .space
-                    .outputs()
-                    .next()
-                    .unwrap()
-                    .clone(),
-            );
+            .unwrap_or(self.space.outputs().next().unwrap().clone());
         let ws = &mut self.workspaces.get_current_mut();
-        let space = &mut ws.space;
 
-        let window = space
+        let window = self
+            .space
             .elements()
             .find(|w| w.toplevel().map(|s| s == &surface).unwrap_or(false))
             .cloned()
             .unwrap();
-        ws.full_geo = space.element_geometry(&window);
+        ws.full_geo = self.space.element_geometry(&window);
 
-        space.map_element(window.clone(), (0, 0), false);
-        let geo = space.output_geometry(&output).unwrap();
+        self.space.map_element(window.clone(), (0, 0), false);
+        let geo = self.space.output_geometry(&output).unwrap();
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Fullscreen);
             state.size = Some(geo.size);
@@ -62,8 +54,8 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
         let ws = &mut self.workspaces.get_current_mut();
-        let space = &mut ws.space;
-        let window = space
+        let window = self
+            .space
             .elements()
             .find(|w| w.toplevel().map(|s| s == &surface).unwrap_or(false))
             .cloned()
@@ -73,7 +65,8 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
             state.size = ws.full_geo.map(|w| w.size);
             state.fullscreen_output.take()
         });
-        space.map_element(window, ws.full_geo.unwrap().loc, false);
+        self.space
+            .map_element(window, ws.full_geo.unwrap().loc, false);
         self.workspaces.get_current_mut().full_geo = None;
         surface.send_configure();
     }
@@ -81,7 +74,7 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let window = Window::new_wayland_window(surface);
         self.workspaces.insert_window(window.clone());
-        self.workspaces.layout();
+        self.refresh_layout();
         self.set_keyboard_focus_auto();
     }
 
@@ -103,8 +96,8 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
             .find(|w| w.toplevel().unwrap() == &surface)
             .unwrap()
             .clone();
-        self.workspaces.remove_window(&window);
-        self.workspaces.layout();
+        self.workspaces.remove_window(&window, &mut self.space);
+        self.refresh_layout();
         self.set_keyboard_focus_auto();
     }
 

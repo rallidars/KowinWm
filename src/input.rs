@@ -148,21 +148,9 @@ impl<BackendData: Backend + 'static> State<BackendData> {
                 }
             }
             InputEvent::PointerMotionAbsolute { event } => {
-                let output = self
-                    .workspaces
-                    .get_current()
-                    .space
-                    .outputs()
-                    .next()
-                    .unwrap()
-                    .clone();
+                let output = self.space.outputs().next().unwrap().clone();
 
-                let output_geo = self
-                    .workspaces
-                    .get_current()
-                    .space
-                    .output_geometry(&output)
-                    .unwrap();
+                let output_geo = self.space.output_geometry(&output).unwrap();
 
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
 
@@ -277,17 +265,8 @@ impl<BackendData: Backend + 'static> State<BackendData> {
     fn clamp_coords(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {
         let (pos_x, pos_y) = pos.into();
         let (max_x, max_y) = self
-            .workspaces
-            .get_current()
             .space
-            .output_geometry(
-                self.workspaces
-                    .get_current()
-                    .space
-                    .outputs()
-                    .next()
-                    .unwrap(),
-            )
+            .output_geometry(self.space.outputs().next().unwrap())
             .unwrap()
             .size
             .into();

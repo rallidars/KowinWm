@@ -18,7 +18,7 @@ impl Default for Config {
         Self {
             border: Border {
                 thickness: 2,
-                gap: 10,
+                gap: 2,
                 active: 0x8B4000,
                 inactive: 0x2A2A2A,
             },

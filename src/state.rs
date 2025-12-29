@@ -1,7 +1,7 @@
 use std::{ffi::OsString, sync::Arc, time::Instant};
 
 use smithay::{
-    desktop::{layer_map_for_output, PopupManager, WindowSurfaceType},
+    desktop::{layer_map_for_output, PopupManager, Space, Window, WindowSurfaceType},
     input::{keyboard::XkbConfig, pointer::PointerHandle, Seat, SeatState},
     reexports::{
         calloop::{
@@ -27,8 +27,8 @@ use smithay::{
     },
 };
 
-use crate::SERIAL_COUNTER;
 use crate::{config::Config, workspaces::Workspaces};
+use crate::{workspaces::is_fullscreen, SERIAL_COUNTER};
 
 pub struct CalloopData<BackendData: Backend + 'static> {
     pub state: State<BackendData>,
@@ -60,6 +60,7 @@ pub struct State<BackendData: Backend + 'static> {
     pub popup_manager: PopupManager,
     pub xdg_decoration_state: XdgDecorationState,
     pub layer_shell_state: WlrLayerShellState,
+    pub space: Space<Window>,
 }
 
 impl<BackendData: Backend + 'static> State<BackendData> {
@@ -140,6 +141,7 @@ impl<BackendData: Backend + 'static> State<BackendData> {
             xdg_decoration_state,
             primary_selection_state,
             layer_shell_state,
+            space: Space::default(),
         }
     }
 
@@ -150,12 +152,11 @@ impl<BackendData: Backend + 'static> State<BackendData> {
         Point<f64, Logical>,
     )> {
         let pos = self.pointer_location;
-        let space = &self.workspaces.get_current().space;
-        let output = space.outputs().find(|o| {
-            let geometry = space.output_geometry(o).unwrap();
+        let output = self.space.outputs().find(|o| {
+            let geometry = self.space.output_geometry(o).unwrap();
             geometry.contains(pos.to_i32_round())
         })?;
-        let output_geo = space.output_geometry(output).unwrap();
+        let output_geo = self.space.output_geometry(output).unwrap();
 
         let mut under = None;
         let layers = layer_map_for_output(&output);
@@ -184,10 +185,8 @@ impl<BackendData: Backend + 'static> State<BackendData> {
                     (surface_loc + layer_loc).to_f64() + output_geo.loc.to_f64(),
                 ));
             }
-        } else if let Some((window, loc)) = space.element_under(pos) {
-            under = window
-                .wl_surface()
-                .map(|s| (s.as_ref().clone(), loc.to_f64()));
+        } else if let Some(data) = self.window_under() {
+            under = Some(data);
         } else if let Some(layer) = layers
             .layer_under(wlr_layer::Layer::Bottom, pos)
             .or_else(|| layers.layer_under(wlr_layer::Layer::Background, pos))
@@ -210,6 +209,25 @@ impl<BackendData: Backend + 'static> State<BackendData> {
 
         under
     }
+    fn window_under(
+        &self,
+    ) -> Option<(
+        smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        Point<f64, Logical>,
+    )> {
+        let offset = self.config.border.gap + self.config.border.thickness;
+        for element in self.space.elements() {
+            let mut geo = self.space.element_geometry(element)?;
+            geo.size += (offset * 2, offset * 2).into();
+            geo.loc -= (offset, offset).into();
+            if geo.contains(self.pointer_location.to_i32_round()) {
+                return element
+                    .wl_surface()
+                    .map(|s| (s.as_ref().clone(), geo.loc.to_f64()));
+            }
+        }
+        None
+    }
 
     pub fn set_keyboard_focus(&mut self, surface: Option<WlSurface>) {
         if let Some(keyboard) = self.seat.get_keyboard() {
@@ -228,6 +246,63 @@ impl<BackendData: Backend + 'static> State<BackendData> {
                 .find(|w| w.wl_surface().map(|s| *s == under).unwrap_or(false));
             self.workspaces.set_active_window(active.cloned());
             self.set_keyboard_focus(Some(under));
+        }
+    }
+
+    pub fn refresh_layout(&mut self) {
+        self.space.refresh();
+        let offset = self.config.border.gap + self.config.border.thickness;
+        let ws = &mut self.workspaces.get_current_mut();
+
+        let output = match self.space.outputs().next() {
+            Some(o) => o.clone(),
+            None => return, // no output, nothing to do
+        };
+        let geo = layer_map_for_output(&output).non_exclusive_zone();
+
+        let output_width = geo.size.w;
+        let output_height = geo.size.h;
+
+        let count = ws.layout.len() as i32;
+
+        if count == 0 {
+            return;
+        }
+
+        if let Some(_fs) = is_fullscreen(ws.layout.iter()) {
+            return;
+        }
+
+        let half_width = output_width / 2;
+        let vertical_height = if count > 1 {
+            output_height / (count - 1)
+        } else {
+            output_height
+        };
+
+        for (i, window) in ws.layout.iter().enumerate() {
+            let (mut x, mut y) = (0, 0);
+            let (mut width, mut height) = (output_width, output_height);
+
+            if count > 1 {
+                width = half_width;
+            }
+
+            if i > 0 {
+                height = vertical_height;
+                x = half_width;
+                y = vertical_height * (i as i32 - 1);
+            }
+
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|state| {
+                    state.size = Some((width - offset * 2, height - offset * 2).into());
+                });
+                toplevel.send_configure();
+            }
+
+            self.space
+                .map_element(window.clone(), (x + offset, y + offset), false);
         }
     }
 }

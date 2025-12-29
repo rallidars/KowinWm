@@ -164,8 +164,6 @@ impl<BackendData: Backend + 'static> CompositorHandler for State<BackendData> {
                 root = parent;
             }
             if let Some(window) = self
-                .workspaces
-                .get_current()
                 .space
                 .elements()
                 .find(|w| w.toplevel().unwrap().wl_surface() == &root)
@@ -174,11 +172,7 @@ impl<BackendData: Backend + 'static> CompositorHandler for State<BackendData> {
             }
         };
         self.popup_manager.commit(surface);
-        handle_commit(
-            &self.workspaces.get_current().space,
-            surface,
-            &self.popup_manager,
-        );
+        handle_commit(&self.space, surface, &self.popup_manager);
         self.set_keyboard_focus_auto();
     }
 }
@@ -248,15 +242,7 @@ impl<BackendData: Backend + 'static> WlrLayerShellHandler for State<BackendData>
         let output = output
             .as_ref()
             .and_then(Output::from_resource)
-            .unwrap_or_else(|| {
-                self.workspaces
-                    .get_current()
-                    .space
-                    .outputs()
-                    .next()
-                    .unwrap()
-                    .clone()
-            });
+            .unwrap_or_else(|| self.space.outputs().next().unwrap().clone());
         let mut map = layer_map_for_output(&output);
         let layer_surface = LayerSurface::new(surface, namespace);
         map.map_layer(&layer_surface).unwrap();
@@ -267,16 +253,14 @@ impl<BackendData: Backend + 'static> WlrLayerShellHandler for State<BackendData>
         &mut self.layer_shell_state
     }
     fn layer_destroyed(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface) {
-        if let Some((mut map, layer)) =
-            self.workspaces.get_current().space.outputs().find_map(|o| {
-                let map = layer_map_for_output(o);
-                let layer = map
-                    .layers()
-                    .find(|&layer| layer.layer_surface() == &surface)
-                    .cloned();
-                layer.map(|layer| (map, layer))
-            })
-        {
+        if let Some((mut map, layer)) = self.space.outputs().find_map(|o| {
+            let map = layer_map_for_output(o);
+            let layer = map
+                .layers()
+                .find(|&layer| layer.layer_surface() == &surface)
+                .cloned();
+            layer.map(|layer| (map, layer))
+        }) {
             map.unmap_layer(&layer);
         }
         self.set_keyboard_focus_auto();

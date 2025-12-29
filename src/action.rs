@@ -47,26 +47,33 @@ impl Action {
                 }
             }
             Action::SetActiveWorkspace(ws_id) => {
-                state.workspaces.set_active_workspace(*ws_id);
-                state.workspaces.layout();
+                state
+                    .workspaces
+                    .set_active_workspace(*ws_id, &mut state.space);
+                state.refresh_layout();
                 state.set_keyboard_focus_auto();
             }
             Action::MoveWindowToWorkspace(ws_index) => {
-                state.workspaces.move_window_to_ws(*ws_index);
-                state.workspaces.layout();
+                state
+                    .workspaces
+                    .move_window_to_ws(*ws_index, &mut state.space);
+                state.refresh_layout();
                 state.set_keyboard_focus_auto();
             }
             Action::MoveWindow(direction) => {
+                for el in state.workspaces.get_current().layout.iter() {
+                    state.space.unmap_elem(&el);
+                }
                 state
                     .workspaces
-                    .move_window(direction, &mut state.pointer_location);
-                state.workspaces.layout();
+                    .move_window(direction, &mut state.pointer_location, &state.space);
+                state.refresh_layout();
                 state.set_keyboard_focus_auto();
             }
             Action::ChangeFocus(direction) => {
                 state
                     .workspaces
-                    .change_focus(direction, &mut state.pointer_location);
+                    .change_focus(direction, &mut state.pointer_location, &state.space);
                 state.set_keyboard_focus_auto();
             }
             Action::FullScreen => {

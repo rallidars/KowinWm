@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io, path::PathBuf, time::Duration};
+use std::{collections::HashMap, io, path::PathBuf, thread::current, time::Duration};
 
 use crate::{
     render::CustomRenderElements,
@@ -263,21 +263,9 @@ pub fn init_udev() {
 
     event_loop
         .run(None, &mut calloopdata, move |data| {
-            data.state
-                .workspaces
-                .get_current()
-                .space
-                .elements()
-                .for_each(|e| e.refresh());
+            data.state.space.elements().for_each(|e| e.refresh());
 
-            let output = data
-                .state
-                .workspaces
-                .get_current()
-                .space
-                .outputs()
-                .next()
-                .unwrap();
+            let output = data.state.space.outputs().next().unwrap();
             for layer in layer_map_for_output(output).layers() {
                 layer.send_frame(
                     output,
@@ -392,7 +380,7 @@ impl State<UdevData> {
                     .disable_global::<State<UdevData>>(surface.global_id.clone());
 
                 for workspace in self.workspaces.workspaces.iter_mut() {
-                    workspace.space.unmap_output(&surface.output)
+                    self.space.unmap_output(&surface.output)
                 }
             }
         }
@@ -557,9 +545,7 @@ impl State<UdevData> {
                     output: output.clone(),
                     global_id: global,
                 };
-                for workspace in self.workspaces.workspaces.iter_mut() {
-                    workspace.space.map_output(&output, (0, 0));
-                }
+                self.space.map_output(&output, (0, 0));
 
                 device.surfaces.insert(crtc, surface);
 
@@ -613,8 +599,7 @@ impl State<UdevData> {
             .single_renderer(&device.render_node)
             .unwrap();
         let ws = self.workspaces.get_current();
-        let current_space = &ws.space;
-        let output = current_space.outputs().next().unwrap();
+        let output = self.space.outputs().next().unwrap();
 
         let mut renderelements: Vec<CustomRenderElements<_>> = vec![];
         let scale = Scale::from(1.0);
@@ -659,33 +644,37 @@ impl State<UdevData> {
         );
 
         let active_window = &ws.active_window;
-        let thickness = self.config.border.thickness;
-        let is_full = is_fullscreen(self.workspaces.get_current().space.elements());
+        let border_thickness = self.config.border.thickness;
+        let is_full = is_fullscreen(self.space.elements());
         if let Some(win) = is_full {
-            let location = current_space.element_location(win).unwrap();
+            let location = self.space.element_location(win).unwrap();
             renderelements.extend(
                 win.render_elements(&mut renderer, location.to_physical(1), scale, 1.0)
                     .into_iter()
                     .map(CustomRenderElements::Window),
             );
         } else {
-            for window in ws.space.elements() {
-                let mut geo = current_space.element_geometry(&window).unwrap();
-                //geo.size = (self.config.border.thickness, self.config.border.thickness).into();
-
-                //geo.loc += (self.config.border.thickness, self.config.border.thickness).into();
-
+            for window in self.space.elements() {
+                let mut geo = self.space.element_geometry(&window).unwrap();
+                geo.size += (border_thickness * 2, border_thickness * 2).into();
+                // Shift the location of the top left by the border thickness.
+                geo.loc -= (border_thickness, border_thickness).into();
                 let color = if Some(window) == active_window.as_ref() {
                     self.config.border.active
                 } else {
                     self.config.border.inactive
                 };
 
-                let border =
-                    BorderShader::element(renderer.as_mut(), geo, 1.0, color, thickness as f32);
+                let border = BorderShader::element(
+                    renderer.as_mut(),
+                    geo,
+                    1.0,
+                    color,
+                    border_thickness as f32,
+                );
 
                 renderelements.push(CustomRenderElements::Shader(border));
-                let location = geo.loc - window.geometry().loc;
+                let location = self.space.element_location(&window).unwrap();
 
                 renderelements.extend(
                     window
@@ -804,18 +793,14 @@ impl State<UdevData> {
                 .expect("failed to schedule frame timer");
         }
 
-        self.workspaces
-            .get_current()
-            .space
-            .elements()
-            .for_each(|window| {
-                window.send_frame(
-                    output,
-                    self.start_time.elapsed(),
-                    Some(Duration::ZERO),
-                    |_, _| Some(output.clone()),
-                );
-            });
+        self.space.elements().for_each(|window| {
+            window.send_frame(
+                output,
+                self.start_time.elapsed(),
+                Some(Duration::ZERO),
+                |_, _| Some(output.clone()),
+            );
+        });
         result
     }
 }

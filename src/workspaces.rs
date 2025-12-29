@@ -14,7 +14,6 @@ use crate::{
 };
 
 pub struct Workspace {
-    pub space: Space<Window>,
     pub full_geo: Option<Rectangle<i32, Logical>>,
     pub layout: Vec<Window>,
     pub active_window: Option<Window>,
@@ -24,7 +23,6 @@ pub struct Workspace {
 impl Workspace {
     pub fn new() -> Self {
         Self {
-            space: Space::default(),
             full_geo: None,
             layout: vec![],
             active_window: None,
@@ -69,10 +67,14 @@ impl Workspaces {
     }
 
     pub fn is_ws_empty(&self, workspace: usize) -> bool {
-        return self.workspaces[workspace].space.elements().len() == 0;
+        return self.workspaces[workspace].layout.is_empty();
     }
 
-    pub fn set_active_workspace(&mut self, workspace: usize) {
+    pub fn set_active_workspace(&mut self, workspace: usize, space: &mut Space<Window>) {
+        let ws = self.get_current();
+        for window in ws.layout.iter() {
+            space.unmap_elem(&window);
+        }
         if workspace >= self.workspaces.len() {
             return;
         }
@@ -80,7 +82,7 @@ impl Workspaces {
         self.active_workspace = workspace;
     }
 
-    pub fn move_window_to_ws(&mut self, ws_index: usize) {
+    pub fn move_window_to_ws(&mut self, ws_index: usize, space: &mut Space<Window>) {
         let active = match self.get_active_window() {
             Some(index) => index,
             None => return,
@@ -96,14 +98,11 @@ impl Workspaces {
                 true
             }
         });
-        if let Some(r) = removed {
-            ws.space.unmap_elem(&r);
-        }
-        self.set_active_workspace(ws_index);
+        self.set_active_workspace(ws_index, space);
         self.insert_window(active.clone());
     }
 
-    pub fn remove_window(&mut self, surface: &Window) {
+    pub fn remove_window(&mut self, surface: &Window, space: &mut Space<Window>) {
         let ws = self.get_current_mut();
         let mut removed = None;
         ws.layout.retain(|w| {
@@ -115,7 +114,7 @@ impl Workspaces {
             }
         });
         if let Some(r) = removed {
-            ws.space.unmap_elem(&r);
+            space.unmap_elem(&r);
         }
     }
 
@@ -124,23 +123,31 @@ impl Workspaces {
         ws.layout.push(window);
     }
 
-    pub fn change_focus(&mut self, direction: &Direction, loc: &mut Point<f64, Logical>) {
-        let space = &self.get_current().space;
-
+    pub fn change_focus(
+        &mut self,
+        direction: &Direction,
+        loc: &mut Point<f64, Logical>,
+        space: &Space<Window>,
+    ) {
         let focused = self.get_active_window();
         if let Some((window, _)) = best_window(direction, space, focused) {
             *loc = window_center(&space, &window).unwrap();
         }
     }
 
-    pub fn move_window(&mut self, direction: &Direction, loc: &mut Point<f64, Logical>) {
+    pub fn move_window(
+        &mut self,
+        direction: &Direction,
+        loc: &mut Point<f64, Logical>,
+        space: &Space<Window>,
+    ) {
         let ws = self.get_current();
         let Some(focused) = self.get_active_window() else {
             return;
         };
 
         // Find the best window to swap with
-        let Some((best, _)) = best_window(direction, &ws.space, Some(focused.clone())) else {
+        let Some((best, _)) = best_window(direction, space, Some(focused.clone())) else {
             return;
         };
 
@@ -157,67 +164,11 @@ impl Workspaces {
             Some(w) => w,
             None => return,
         };
-        *loc = window_center(&ws.space, &best).unwrap();
+        *loc = window_center(space, &best).unwrap();
         self.get_current_mut().layout.swap(focused_pos, best_pos);
     }
 
     fn render_elements(&self) {}
-
-    pub fn layout(&mut self) {
-        let ws = &mut self.get_current_mut();
-        let space = &mut ws.space;
-        space.refresh();
-
-        let output = match space.outputs().next() {
-            Some(o) => o.clone(),
-            None => return, // no output, nothing to do
-        };
-        let geo = layer_map_for_output(&output).non_exclusive_zone();
-
-        let output_width = geo.size.w;
-        let output_height = geo.size.h;
-
-        let count = ws.layout.len() as i32;
-
-        if count == 0 {
-            return;
-        }
-
-        if let Some(_fs) = is_fullscreen(ws.layout.iter()) {
-            return;
-        }
-
-        let half_width = output_width / 2;
-        let vertical_height = if count > 1 {
-            output_height / (count - 1)
-        } else {
-            output_height
-        };
-
-        for (i, window) in ws.layout.iter().enumerate() {
-            let (mut x, mut y) = (0, 0);
-            let (mut width, mut height) = (output_width, output_height);
-
-            if count > 1 {
-                width = half_width;
-            }
-
-            if i > 0 {
-                height = vertical_height;
-                x = half_width;
-                y = vertical_height * (i as i32 - 1);
-            }
-
-            if let Some(toplevel) = window.toplevel() {
-                toplevel.with_pending_state(|state| {
-                    state.size = Some((width, height).into());
-                });
-                toplevel.send_configure();
-            }
-
-            space.map_element(window.clone(), (x, y), false);
-        }
-    }
 }
 
 pub fn is_fullscreen<'a, I>(elements: I) -> Option<&'a Window>
