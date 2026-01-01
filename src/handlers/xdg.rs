@@ -1,10 +1,14 @@
+use std::fs;
+
 use smithay::{
     delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{find_popup_root_surface, get_popup_toplevel_coords, PopupKind, Window},
     input::Seat,
     output::Output,
     reexports::{
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        wayland_protocols::xdg::shell::server::{
+            xdg_positioner::ConstraintAdjustment, xdg_toplevel,
+        },
         wayland_server::{protocol::wl_seat, Resource},
     },
     utils::Serial,
@@ -17,9 +21,9 @@ use smithay::{
     },
 };
 
-use crate::state::{Backend, State};
+use crate::state::State;
 
-impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
+impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
     }
@@ -79,8 +83,27 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(surface.clone())) else {
+            return;
+        };
+
+        let Some(window) = self
+            .workspaces
+            .get_current()
+            .layout
+            .iter()
+            .find(|w| w.wl_surface().unwrap().as_ref() == &root)
+            .clone()
+        else {
+            return;
+        };
+
+        let window_geo = window.geometry();
+
+        let geometry = positioner.get_unconstrained_geometry(window_geo);
+
         surface.with_pending_state(|state| {
-            state.geometry = positioner.get_geometry();
+            state.geometry = geometry;
         });
         if let Err(err) = self.popup_manager.track_popup(PopupKind::from(surface)) {
             tracing::warn!("Failed to track popup: {}", err);
@@ -102,7 +125,7 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
     }
 
     fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
-        let seat: Seat<State<BackendData>> = Seat::from_resource(&seat).unwrap();
+        let seat: Seat<State> = Seat::from_resource(&seat).unwrap();
         let kind = PopupKind::Xdg(surface);
         let root = find_popup_root_surface(&kind).unwrap();
         self.popup_manager
@@ -120,18 +143,37 @@ impl<BackendData: Backend + 'static> XdgShellHandler for State<BackendData> {
             state.geometry = positioner.get_geometry();
             state.positioner = positioner
         });
+        let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(surface.clone())) else {
+            return;
+        };
+
+        let Some(window) = self
+            .workspaces
+            .get_current()
+            .layout
+            .iter()
+            .find(|w| w.wl_surface().unwrap().as_ref() == &root)
+            .clone()
+        else {
+            return;
+        };
+
+        let geometry = window.geometry();
+
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_unconstrained_geometry(geometry);
+        });
 
         surface.send_repositioned(token);
     }
 }
 
-delegate_xdg_shell!(@<BackendData: Backend + 'static> State<BackendData>);
+delegate_xdg_shell!(State);
 
-impl<BackendData: Backend + 'static> XdgDecorationHandler for State<BackendData> {
+impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode::ServerSide)
-
         });
         toplevel.send_configure();
     }
@@ -143,4 +185,4 @@ impl<BackendData: Backend + 'static> XdgDecorationHandler for State<BackendData>
     ) {
     }
 }
-delegate_xdg_decoration!(@<BackendData: Backend + 'static> State<BackendData>);
+delegate_xdg_decoration!(State);

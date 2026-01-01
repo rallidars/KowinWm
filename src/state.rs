@@ -1,6 +1,7 @@
 use std::{ffi::OsString, sync::Arc, time::Instant};
 
 use smithay::{
+    backend::session::Session,
     desktop::{layer_map_for_output, PopupManager, Space, Window, WindowSurfaceType},
     input::{keyboard::XkbConfig, pointer::PointerHandle, Seat, SeatState},
     reexports::{
@@ -27,22 +28,18 @@ use smithay::{
     },
 };
 
-use crate::{config::Config, workspaces::Workspaces};
+use crate::{backend::udev::UdevData, config::Config, workspaces::Workspaces};
 use crate::{workspaces::is_fullscreen, SERIAL_COUNTER};
 
-pub struct CalloopData<BackendData: Backend + 'static> {
-    pub state: State<BackendData>,
+pub struct CalloopData {
+    pub state: State,
     pub display_handle: DisplayHandle,
 }
 
-pub trait Backend {
-    fn seat_name(&self) -> String;
-}
-
-pub struct State<BackendData: Backend + 'static> {
+pub struct State {
     pub config: Config,
-    pub backend_data: BackendData,
-    pub loop_handle: LoopHandle<'static, CalloopData<BackendData>>,
+    pub backend_data: UdevData,
+    pub loop_handle: LoopHandle<'static, CalloopData>,
     pub workspaces: Workspaces,
     pub display_handle: DisplayHandle,
     pub start_time: Instant,
@@ -63,12 +60,12 @@ pub struct State<BackendData: Backend + 'static> {
     pub space: Space<Window>,
 }
 
-impl<BackendData: Backend + 'static> State<BackendData> {
+impl State {
     pub fn new(
-        loop_handle: LoopHandle<'static, CalloopData<BackendData>>,
+        loop_handle: LoopHandle<'static, CalloopData>,
         loop_signal: LoopSignal,
         display: Display<Self>,
-        backend_data: BackendData,
+        backend_data: UdevData,
     ) -> Self {
         let start_time = Instant::now();
         let dh = display.handle();
@@ -78,7 +75,7 @@ impl<BackendData: Backend + 'static> State<BackendData> {
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let mut seat_state: SeatState<Self> = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
-        let seat_name = backend_data.seat_name();
+        let seat_name = backend_data.session.seat();
         let mut seat = seat_state.new_wl_seat(&dh, seat_name.clone());
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
@@ -87,6 +84,7 @@ impl<BackendData: Backend + 'static> State<BackendData> {
         seat.add_keyboard(XkbConfig::default(), 200, 25).unwrap();
         let pointer = seat.add_pointer();
         let listening_socket = ListeningSocketSource::new_auto().unwrap();
+        let config = Config::get_config().unwrap_or_default();
 
         // Get the name of the listening socket.
         // Clients will connect to this socket.
@@ -121,12 +119,11 @@ impl<BackendData: Backend + 'static> State<BackendData> {
             .expect("Failed to init wayland server source");
 
         Self {
-            config: Config::get_config().unwrap_or_default(),
             pointer_location: (0.0, 0.0).into(),
             pointer,
             backend_data,
             loop_handle,
-            workspaces: Workspaces::new(),
+            workspaces: Workspaces::new(config.workspaces),
             display_handle: dh,
             loop_signal,
             start_time,
@@ -142,6 +139,7 @@ impl<BackendData: Backend + 'static> State<BackendData> {
             primary_selection_state,
             layer_shell_state,
             space: Space::default(),
+            config,
         }
     }
 
@@ -151,6 +149,7 @@ impl<BackendData: Backend + 'static> State<BackendData> {
         smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
         Point<f64, Logical>,
     )> {
+        let ws = self.workspaces.get_current();
         let pos = self.pointer_location;
         let output = self.space.outputs().find(|o| {
             let geometry = self.space.output_geometry(o).unwrap();
@@ -161,8 +160,10 @@ impl<BackendData: Backend + 'static> State<BackendData> {
         let mut under = None;
         let layers = layer_map_for_output(&output);
 
-        // Search from highest to lowest layer for proper occlusion
-        if let Some(layer) = layers
+        if let Some(fullscreen) = is_fullscreen(self.space.elements()) {
+            under = fullscreen.surface_under(pos - output_geo.loc.to_f64(), WindowSurfaceType::ALL);
+            // Search from highest to lowest layer for proper occlusion
+        } else if let Some(layer) = layers
             .layer_under(wlr_layer::Layer::Overlay, pos)
             .or_else(|| layers.layer_under(wlr_layer::Layer::Top, pos))
             .or_else(|| {
@@ -180,10 +181,7 @@ impl<BackendData: Backend + 'static> State<BackendData> {
             if let Some((surface, surface_loc)) =
                 layer.surface_under(relative_pos, WindowSurfaceType::ALL)
             {
-                under = Some((
-                    surface,
-                    (surface_loc + layer_loc).to_f64() + output_geo.loc.to_f64(),
-                ));
+                under = Some((surface, surface_loc + layer_loc + output_geo.loc));
             }
         } else if let Some(data) = self.window_under() {
             under = Some(data);
@@ -200,30 +198,28 @@ impl<BackendData: Backend + 'static> State<BackendData> {
             if let Some((surface, surface_loc)) =
                 layer.surface_under(relative_pos, WindowSurfaceType::ALL)
             {
-                under = Some((
-                    surface,
-                    (surface_loc + layer_loc).to_f64() + output_geo.loc.to_f64(),
-                ));
+                under = Some((surface, surface_loc + layer_loc + output_geo.loc));
             }
         }
 
-        under
+        under.map(|(s, loc)| (s, loc.to_f64()))
     }
     fn window_under(
         &self,
     ) -> Option<(
         smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
-        Point<f64, Logical>,
+        Point<i32, Logical>,
     )> {
         let offset = self.config.border.gap + self.config.border.thickness;
         for element in self.space.elements() {
-            let mut geo = self.space.element_geometry(element)?;
-            geo.size += (offset * 2, offset * 2).into();
-            geo.loc -= (offset, offset).into();
-            if geo.contains(self.pointer_location.to_i32_round()) {
+            let geo = self.space.element_geometry(element)?;
+            let mut offset_geo = geo;
+            offset_geo.size += (offset * 2, offset * 2).into();
+            offset_geo.loc -= (offset, offset).into();
+            if offset_geo.contains(self.pointer_location.to_i32_round()) {
                 return element
                     .wl_surface()
-                    .map(|s| (s.as_ref().clone(), geo.loc.to_f64()));
+                    .map(|s| (s.as_ref().clone(), geo.loc - element.geometry().loc));
             }
         }
         None

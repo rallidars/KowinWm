@@ -3,7 +3,7 @@ use std::{collections::HashMap, io, path::PathBuf, thread::current, time::Durati
 use crate::{
     render::CustomRenderElements,
     shaders::{compile_shaders, BorderShader},
-    state::{Backend, CalloopData, State},
+    state::{CalloopData, State},
     workspaces::is_fullscreen,
 };
 use smithay::{
@@ -83,7 +83,7 @@ pub struct UdevData {
     //damage_tracker: Option<OutputDamageTracker>,
 }
 
-impl DmabufHandler for State<UdevData> {
+impl DmabufHandler for State {
     fn dmabuf_state(&mut self) -> &mut DmabufState {
         &mut self.backend_data.dmabuf_state.as_mut().unwrap().0
     }
@@ -101,13 +101,13 @@ impl DmabufHandler for State<UdevData> {
             .and_then(|mut renderer| renderer.import_dmabuf(&dmabuf, None))
             .is_ok()
         {
-            let _ = notifier.successful::<State<UdevData>>();
+            let _ = notifier.successful::<State>();
         } else {
             notifier.failed();
         }
     }
 }
-delegate_dmabuf!(State<UdevData>);
+delegate_dmabuf!(State);
 
 pub struct Device {
     pub surfaces: HashMap<crtc::Handle, Surface>,
@@ -133,15 +133,9 @@ pub struct Surface {
     pointer_texture: TextureBuffer<GlesTexture>,
 }
 
-impl Backend for UdevData {
-    fn seat_name(&self) -> String {
-        self.session.seat().clone()
-    }
-}
-
 pub fn init_udev() {
-    let mut event_loop: EventLoop<CalloopData<UdevData>> = EventLoop::try_new().unwrap();
-    let display: Display<State<UdevData>> = Display::new().unwrap();
+    let mut event_loop: EventLoop<CalloopData> = EventLoop::try_new().unwrap();
+    let display: Display<State> = Display::new().unwrap();
     let mut display_handle: DisplayHandle = display.handle().clone();
     /*
      Initialize session
@@ -194,11 +188,54 @@ pub fn init_udev() {
         .insert_source(seat_notifier, move |event, _, data| match event {
             SessionEvent::PauseSession => {
                 libinput_context.suspend();
+                for backend in data.state.backend_data.devices.values_mut() {
+                    backend.drm.pause();
+                }
                 tracing::info!("pausing session");
             }
             SessionEvent::ActivateSession => {
-                libinput_context.resume().unwrap();
-                tracing::info!("pausing session");
+                tracing::info!("resuming session");
+
+                if let Err(err) = libinput_context.resume() {
+                    tracing::error!("Failed to resume libinput context: {:?}", err);
+                }
+                for (node, backend) in data
+                    .state
+                    .backend_data
+                    .devices
+                    .iter_mut()
+                    .map(|(handle, backend)| (*handle, backend))
+                {
+                    //TODO handle errors
+                    let _ = backend.drm.activate(false);
+                    for (crtc, surface) in backend
+                        .surfaces
+                        .iter_mut()
+                        .map(|(handle, surface)| (*handle, surface))
+                    {
+                        if let Err(err) = surface.compositor.surface().reset_state() {
+                            tracing::warn!("Failed to reset drm surface state: {}", err);
+                        }
+                        // reset the buffers after resume to trigger a full redraw
+                        // this is important after a vt switch as the primary plane
+                        // has no content and damage tracking may prevent a redraw
+                        // otherwise
+                        surface.compositor.reset_buffers();
+                        data.state.loop_handle.insert_idle(move |data| {
+                            if let Some(SwapBuffersError::ContextLost(_)) =
+                                data.state.render(node, crtc).err()
+                            {
+                                tracing::info!("Context lost on device {}, re-creating", node);
+                                data.state.on_device_removed(node);
+                                data.state.on_device_added(
+                                    node,
+                                    node.dev_path().unwrap(),
+                                    &mut data.display_handle,
+                                );
+                            }
+                        });
+                    }
+                }
             }
         })
         .unwrap();
@@ -206,7 +243,7 @@ pub fn init_udev() {
      * Initialize udev
      */
 
-    let backend = UdevBackend::new(&state.backend_data.seat_name()).unwrap();
+    let backend = UdevBackend::new(&state.backend_data.session.seat()).unwrap();
     for (device_id, path) in backend.device_list() {
         tracing::info!("udev device {}", path.display());
         state.on_udev_event(
@@ -249,9 +286,10 @@ pub fn init_udev() {
         .unwrap();
     let mut dmabuf_state = DmabufState::new();
     let global = dmabuf_state
-        .create_global_with_default_feedback::<State<UdevData>>(&display_handle, &default_feedback);
+        .create_global_with_default_feedback::<State>(&display_handle, &default_feedback);
     state.backend_data.dmabuf_state = Some((dmabuf_state, global));
 
+    let autostart = state.config.autostart.clone();
     let mut calloopdata = CalloopData {
         state,
         display_handle,
@@ -259,6 +297,15 @@ pub fn init_udev() {
 
     unsafe {
         std::env::set_var("WAYLAND_DISPLAY", &calloopdata.state.socket_name);
+    }
+
+    for program in autostart {
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&program)
+            .spawn()
+            .map_err(|e| tracing::info!("Failed to spawn '{program}': {e}"))
+            .ok();
     }
 
     event_loop
@@ -282,7 +329,7 @@ pub fn init_udev() {
 }
 
 // Udev
-impl State<UdevData> {
+impl State {
     pub fn on_udev_event(&mut self, event: UdevEvent, display: &mut DisplayHandle) {
         match event {
             UdevEvent::Added { device_id, path } => {
@@ -377,18 +424,18 @@ impl State<UdevData> {
 
             for surface in device.surfaces.values() {
                 self.display_handle
-                    .disable_global::<State<UdevData>>(surface.global_id.clone());
+                    .disable_global::<State>(surface.global_id.clone());
 
-                for workspace in self.workspaces.workspaces.iter_mut() {
-                    self.space.unmap_output(&surface.output)
-                }
+                //for workspace in self.workspaces.workspaces.iter_mut() {
+                self.space.unmap_output(&surface.output)
+                //}
             }
         }
     }
 }
 
 // Drm
-impl State<UdevData> {
+impl State {
     pub fn on_drm_event(
         &mut self,
         node: DrmNode,
@@ -437,6 +484,14 @@ impl State<UdevData> {
                     connector.interface_id()
                 );
                 tracing::info!("New output connected, name: {}", name);
+                // Check if this output is in the config
+                let config_output = self.config.outputs.get(&name);
+                if let Some(output_data) = config_output {
+                    if !output_data.enabled {
+                        tracing::info!("Output {} disabled in config, skipping", name);
+                        return;
+                    }
+                }
 
                 let drm_mode = *connector
                     .modes()
@@ -455,7 +510,7 @@ impl State<UdevData> {
 
                 let (w, h) = connector.size().unwrap_or((0, 0));
                 let output = Output::new(
-                    name,
+                    name.clone(),
                     PhysicalProperties {
                         size: (w as i32, h as i32).into(),
                         subpixel: smithay::output::Subpixel::Unknown,
@@ -463,15 +518,28 @@ impl State<UdevData> {
                         model,
                     },
                 );
-                let global = output.create_global::<State<UdevData>>(display);
-                let output_mode = WlMode::from(drm_mode);
-                output.set_preferred(output_mode);
-                output.change_current_state(
-                    Some(output_mode),
-                    Some(Transform::Normal),
-                    Some(smithay::output::Scale::Integer(1)),
-                    None,
-                );
+                let global = output.create_global::<State>(display);
+
+                let mut output_mode = WlMode::from(drm_mode);
+                if let Some(config) = config_output {
+                    output_mode.refresh = config.refresh_rate * 1000;
+                    output_mode.size = config.resolution.into();
+                    output.set_preferred(output_mode);
+                    output.change_current_state(
+                        Some(output_mode),
+                        Some(Transform::Normal),
+                        Some(smithay::output::Scale::Fractional(config.scale)),
+                        Some(config.possition.into()),
+                    );
+                } else {
+                    output.set_preferred(output_mode);
+                    output.change_current_state(
+                        Some(output_mode),
+                        Some(Transform::Normal),
+                        Some(smithay::output::Scale::Integer(1)),
+                        None,
+                    );
+                }
                 let render_formats = renderer
                     .as_mut()
                     .egl_context()
@@ -545,7 +613,7 @@ impl State<UdevData> {
                     output: output.clone(),
                     global_id: global,
                 };
-                self.space.map_output(&output, (0, 0));
+                self.space.map_output(&output, output.current_location());
 
                 device.surfaces.insert(crtc, surface);
 
@@ -589,7 +657,7 @@ pub fn primary_gpu(seat: &str) -> (DrmNode, PathBuf) {
         })
 }
 
-impl State<UdevData> {
+impl State {
     pub fn render(&mut self, node: DrmNode, crtc: crtc::Handle) -> Result<bool, SwapBuffersError> {
         let device = self.backend_data.devices.get_mut(&node).unwrap();
         let surface = device.surfaces.get_mut(&crtc).unwrap();
@@ -674,7 +742,8 @@ impl State<UdevData> {
                 );
 
                 renderelements.push(CustomRenderElements::Shader(border));
-                let location = self.space.element_location(&window).unwrap();
+                let location =
+                    self.space.element_location(&window).unwrap() - window.geometry().loc;
 
                 renderelements.extend(
                     window

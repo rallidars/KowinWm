@@ -1,22 +1,29 @@
+use std::process::Command;
+
+use serde::{Deserialize, Serialize};
+use smithay::backend::session::Session;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::XdgShellHandler;
 
-use crate::state::{Backend, State};
+use crate::state::State;
 use crate::workspaces::is_fullscreen;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Serialize, Deserialize, Clone)]
+#[serde(tag = "action", rename_all = "lowercase")]
 pub enum Action {
-    Spawm(String),
-    Close,
-    SetActiveWorkspace(usize),
-    MoveWindowToWorkspace(usize),
-    Quit,
-    FullScreen,
-    ChangeFocus(Direction),
-    MoveWindow(Direction),
+    Exec { command: String },
+    KillActive,
+    Workspace { index: usize },
+    MoveToWorkspace { index: usize },
+    Exit,
+    Fullscreen,
+    MoveFocus { direction: Direction },
+    MoveWindow { direction: Direction },
+    VTSwitch(i32),
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "lowercase")]
 pub enum Direction {
     Left,
     Right,
@@ -25,15 +32,26 @@ pub enum Direction {
 }
 
 impl Action {
-    pub fn execute<BackendData: Backend + 'static>(&self, state: &mut State<BackendData>) {
+    pub fn execute(&self, state: &mut State) {
         match self {
-            Action::Quit => {
+            Action::VTSwitch(vt) => {
+                if let Err(err) = state.backend_data.session.change_vt(*vt) {
+                    tracing::error!("Error changing vt: {}", err)
+                }
+            }
+            Action::Exit => {
                 state.loop_signal.stop();
             }
-            Action::Spawm(program) => {
-                std::process::Command::new(program).spawn().unwrap();
+            Action::Exec { command } => {
+                tracing::debug!("Spawning '{command}'");
+                Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(command)
+                    .spawn()
+                    .map_err(|e| tracing::info!("Failed to spawn '{command}': {e}"))
+                    .ok();
             }
-            Action::Close => {
+            Action::KillActive => {
                 let under = state.surface_under().map(|w| w.0);
                 let toplevel = state
                     .workspaces
@@ -46,37 +64,32 @@ impl Action {
                     toplevel.send_close();
                 }
             }
-            Action::SetActiveWorkspace(ws_id) => {
+            Action::Workspace { index } => {
                 state
                     .workspaces
-                    .set_active_workspace(*ws_id, &mut state.space);
+                    .set_active_workspace(*index, &mut state.space);
                 state.refresh_layout();
                 state.set_keyboard_focus_auto();
             }
-            Action::MoveWindowToWorkspace(ws_index) => {
-                state
-                    .workspaces
-                    .move_window_to_ws(*ws_index, &mut state.space);
+            Action::MoveToWorkspace { index } => {
+                state.workspaces.move_window_to_ws(*index, &mut state.space);
                 state.refresh_layout();
                 state.set_keyboard_focus_auto();
             }
-            Action::MoveWindow(direction) => {
-                for el in state.workspaces.get_current().layout.iter() {
-                    state.space.unmap_elem(&el);
-                }
+            Action::MoveWindow { direction } => {
                 state
                     .workspaces
                     .move_window(direction, &mut state.pointer_location, &state.space);
                 state.refresh_layout();
                 state.set_keyboard_focus_auto();
             }
-            Action::ChangeFocus(direction) => {
+            Action::MoveFocus { direction } => {
                 state
                     .workspaces
                     .change_focus(direction, &mut state.pointer_location, &state.space);
                 state.set_keyboard_focus_auto();
             }
-            Action::FullScreen => {
+            Action::Fullscreen => {
                 let acitve_window = match &state.workspaces.get_current().active_window {
                     Some(active) => active,
                     None => return,

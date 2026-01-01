@@ -2,7 +2,7 @@ mod xdg;
 
 use std::os::fd::OwnedFd;
 
-use crate::state::{Backend, ClientState, State};
+use crate::state::{ClientState, State};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
@@ -53,15 +53,15 @@ use smithay::{
     },
 };
 
-delegate_compositor!(@<BackendData: Backend + 'static> State<BackendData>);
-delegate_shm!(@<BackendData: Backend + 'static> State<BackendData>);
-delegate_seat!(@<BackendData: Backend + 'static> State<BackendData>);
-delegate_data_device!(@<BackendData: Backend + 'static> State<BackendData>);
-delegate_output!(@<BackendData: Backend + 'static> State<BackendData>);
+delegate_compositor!(State);
+delegate_shm!(State);
+delegate_seat!(State);
+delegate_data_device!(State);
+delegate_output!(State);
 
-impl<BackendData: Backend + 'static> OutputHandler for State<BackendData> {}
+impl OutputHandler for State {}
 
-impl<BackendData: Backend + 'static> BufferHandler for State<BackendData> {
+impl BufferHandler for State {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
 }
 
@@ -132,22 +132,22 @@ pub fn handle_commit(space: &Space<Window>, surface: &WlSurface, popup_manager: 
     };
 }
 
-impl<BackendData: Backend + 'static> SelectionHandler for State<BackendData> {
+impl SelectionHandler for State {
     type SelectionUserData = ();
 }
 
-impl<BackendData: Backend + 'static> DataDeviceHandler for State<BackendData> {
+impl DataDeviceHandler for State {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
     }
 }
 
-impl<BackendData: Backend + 'static> ClientDndGrabHandler for State<BackendData> {}
-impl<BackendData: Backend + 'static> ServerDndGrabHandler for State<BackendData> {
+impl ClientDndGrabHandler for State {}
+impl ServerDndGrabHandler for State {
     fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
 }
 
-impl<BackendData: Backend + 'static> CompositorHandler for State<BackendData> {
+impl CompositorHandler for State {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
     }
@@ -177,13 +177,13 @@ impl<BackendData: Backend + 'static> CompositorHandler for State<BackendData> {
     }
 }
 
-impl<BackendData: Backend + 'static> ShmHandler for State<BackendData> {
+impl ShmHandler for State {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
     }
 }
 
-impl<BackendData: Backend + 'static> SeatHandler for State<BackendData> {
+impl SeatHandler for State {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
@@ -231,7 +231,7 @@ impl<BackendData: Backend + 'static> SeatHandler for State<BackendData> {
     }
 }
 
-impl<BackendData: Backend + 'static> WlrLayerShellHandler for State<BackendData> {
+impl WlrLayerShellHandler for State {
     fn new_layer_surface(
         &mut self,
         surface: smithay::wayland::shell::wlr_layer::LayerSurface,
@@ -266,12 +266,12 @@ impl<BackendData: Backend + 'static> WlrLayerShellHandler for State<BackendData>
         self.set_keyboard_focus_auto();
     }
 }
-delegate_layer_shell!(@<BackendData: Backend + 'static> State<BackendData>);
+delegate_layer_shell!(State);
 
-impl<BackendData: Backend> PrimarySelectionHandler for State<BackendData> {
+impl PrimarySelectionHandler for State {
     fn primary_selection_state(&self) -> &PrimarySelectionState {
         &self.primary_selection_state
     }
 }
 
-delegate_primary_selection!(@<BackendData: Backend + 'static> State<BackendData>);
+delegate_primary_selection!(State);

@@ -4,6 +4,7 @@ use smithay::{
         ImportAll, Renderer,
     },
     desktop::{layer_map_for_output, space::SpaceElement, Space, Window},
+    output::Output,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
     utils::{Logical, Point, Rectangle, Size},
     wayland::{seat::WaylandFocus, shell::xdg::ToplevelSurface},
@@ -38,11 +39,11 @@ pub struct Workspaces {
 }
 
 impl Workspaces {
-    pub fn new() -> Self {
+    pub fn new(w: u8) -> Self {
         Self {
-            workspaces: (0..=4).map(|_| Workspace::new()).collect(),
-            active_workspace: 0,
-            prev_workspace: 0,
+            workspaces: (1..=w + 1).map(|_| Workspace::new()).collect(),
+            active_workspace: 1,
+            prev_workspace: 1,
         }
     }
 
@@ -72,11 +73,11 @@ impl Workspaces {
 
     pub fn set_active_workspace(&mut self, workspace: usize, space: &mut Space<Window>) {
         let ws = self.get_current();
-        for window in ws.layout.iter() {
-            space.unmap_elem(&window);
-        }
         if workspace >= self.workspaces.len() {
             return;
+        }
+        for window in ws.layout.iter() {
+            space.unmap_elem(&window);
         }
         self.prev_workspace = self.active_workspace;
         self.active_workspace = workspace;

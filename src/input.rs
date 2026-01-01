@@ -5,7 +5,10 @@ use smithay::{
     },
     desktop::{layer_map_for_output, WindowSurfaceType},
     input::{
-        keyboard::{keysyms, FilterResult},
+        keyboard::{
+            keysyms::{self, KEY_XF86Switch_VT_1, KEY_XF86Switch_VT_12},
+            FilterResult,
+        },
         pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
     },
     utils::{Logical, Point},
@@ -14,11 +17,11 @@ use smithay::{
 
 use crate::{
     action::{Action, Direction},
-    state::Backend,
+    config::parse_keybind,
 };
 use crate::{state::State, SERIAL_COUNTER};
 
-impl<BackendData: Backend + 'static> State<BackendData> {
+impl State {
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         match event {
             InputEvent::Keyboard { event } => {
@@ -31,112 +34,29 @@ impl<BackendData: Backend + 'static> State<BackendData> {
                     0,
                     |state, modifiers, handle| {
                         // Get representation of what key was pressed.
-                        let keysym = handle.modified_sym();
-
                         if press_state == KeyState::Pressed {
-                            //exit WM
-                            if modifiers.logo
-                                && modifiers.shift
-                                && keysym == keysyms::KEY_Escape.into()
+                            let keysym = handle.modified_sym();
+                            for (keymap, action) in &state.config.keymaps {
+                                if let Some((config_modifiers, config_keysyms)) =
+                                    parse_keybind(&keymap)
+                                {
+                                    if modifiers.logo == config_modifiers.logo
+                                        && modifiers.shift == config_modifiers.shift
+                                        && modifiers.ctrl == config_modifiers.ctrl
+                                        && modifiers.alt == config_modifiers.alt
+                                        && keysym.raw() == config_keysyms
+                                    {
+                                        return FilterResult::Intercept(action.clone());
+                                    }
+                                }
+                            }
+                            if (KEY_XF86Switch_VT_1..=KEY_XF86Switch_VT_12)
+                                .contains(&handle.modified_sym().raw())
                             {
-                                return FilterResult::Intercept(Action::Quit);
-                            }
-                            //
-                            if modifiers.logo
-                                && (keysym == keysyms::KEY_q.into()
-                                    || keysym == keysyms::KEY_Q.into())
-                            {
-                                return FilterResult::Intercept(Action::Spawm("kitty".to_string()));
-                            }
-                            if modifiers.logo
-                                && (keysym == keysyms::KEY_c.into()
-                                    || keysym == keysyms::KEY_C.into())
-                            {
-                                return FilterResult::Intercept(Action::Close);
-                            }
-                            if modifiers.logo
-                                && (keysym >= keysyms::KEY_1.into()
-                                    && keysym <= keysyms::KEY_9.into())
-                            {
-                                let index = (keysym.raw() - keysyms::KEY_1) as usize;
-                                return FilterResult::Intercept(Action::SetActiveWorkspace(index));
-                            }
-                            if modifiers.alt
-                                && modifiers.ctrl
-                                && (keysym >= keysyms::KEY_1.into()
-                                    && keysym <= keysyms::KEY_9.into())
-                            {
-                                let index = (keysym.raw() - keysyms::KEY_1) as usize;
-                                return FilterResult::Intercept(Action::MoveWindowToWorkspace(
-                                    index,
-                                ));
-                            }
-                            // move focus
-                            if modifiers.logo {
-                                if keysym == keysyms::KEY_F.into()
-                                    || keysym == keysyms::KEY_f.into()
-                                {
-                                    return FilterResult::Intercept(Action::FullScreen);
-                                }
-                                if keysym == keysyms::KEY_h.into()
-                                    || keysym == keysyms::KEY_H.into()
-                                {
-                                    return FilterResult::Intercept(Action::ChangeFocus(
-                                        Direction::Left,
-                                    ));
-                                }
-                                if keysym == keysyms::KEY_j.into()
-                                    || keysym == keysyms::KEY_J.into()
-                                {
-                                    return FilterResult::Intercept(Action::ChangeFocus(
-                                        Direction::Down,
-                                    ));
-                                }
-                                if keysym == keysyms::KEY_k.into()
-                                    || keysym == keysyms::KEY_K.into()
-                                {
-                                    return FilterResult::Intercept(Action::ChangeFocus(
-                                        Direction::Top,
-                                    ));
-                                }
-                                if keysym == keysyms::KEY_l.into()
-                                    || keysym == keysyms::KEY_L.into()
-                                {
-                                    return FilterResult::Intercept(Action::ChangeFocus(
-                                        Direction::Right,
-                                    ));
-                                }
-                            }
-                            //move window
-                            if modifiers.ctrl && modifiers.alt {
-                                if keysym == keysyms::KEY_h.into()
-                                    || keysym == keysyms::KEY_H.into()
-                                {
-                                    return FilterResult::Intercept(Action::MoveWindow(
-                                        Direction::Left,
-                                    ));
-                                }
-                                if keysym == keysyms::KEY_j.into()
-                                    || keysym == keysyms::KEY_J.into()
-                                {
-                                    return FilterResult::Intercept(Action::MoveWindow(
-                                        Direction::Down,
-                                    ));
-                                }
-                                if keysym == keysyms::KEY_k.into()
-                                    || keysym == keysyms::KEY_K.into()
-                                {
-                                    return FilterResult::Intercept(Action::MoveWindow(
-                                        Direction::Top,
-                                    ));
-                                }
-                                if keysym == keysyms::KEY_l.into()
-                                    || keysym == keysyms::KEY_L.into()
-                                {
-                                    return FilterResult::Intercept(Action::MoveWindow(
-                                        Direction::Right,
-                                    ));
-                                }
+                                // VTSwitch
+                                let vt =
+                                    (handle.modified_sym().raw() - KEY_XF86Switch_VT_1 + 1) as i32;
+                                return FilterResult::Intercept(Action::VTSwitch(vt));
                             }
                         }
 
