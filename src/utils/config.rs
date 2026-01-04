@@ -7,12 +7,18 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use smithay::input::keyboard::{keysyms::*, ModifiersState};
 
-use crate::action::{Action, Direction};
+use crate::utils::action::{Action, Direction};
+
+#[derive(Deserialize, Serialize)]
+pub struct KeyboardConfig {
+    pub layouts: Vec<String>,
+}
 
 #[derive(Deserialize, Serialize)]
 pub struct Config {
     pub workspaces: u8,
     pub border: Border,
+    pub keyboard: KeyboardConfig,
     pub outputs: IndexMap<String, OutputData>,
     pub autostart: Vec<String>,
     pub keymaps: IndexMap<String, Action>,
@@ -26,6 +32,9 @@ impl Default for Config {
             gap: 2,
             active: 0x8B4000,
             inactive: 0x2A2A2A,
+        };
+        let keyboard = KeyboardConfig {
+            layouts: vec!["us".to_string()],
         };
         let mut outputs = IndexMap::new();
         outputs.insert(
@@ -42,7 +51,9 @@ impl Default for Config {
         let mut keymaps = IndexMap::new();
         keymaps.insert("Super+c".to_string(), Action::KillActive);
         keymaps.insert("Super+Shift+Enter".to_string(), Action::Exit);
+        keymaps.insert("Super+space".to_string(), Action::SwitchLayout);
         keymaps.insert("Super+f".to_string(), Action::Fullscreen);
+        keymaps.insert("Super+r".to_string(), Action::ReloadConfig);
         for index in 1..5 {
             keymaps.insert(format!("Super+{index}"), Action::Workspace { index });
         }
@@ -116,6 +127,7 @@ impl Default for Config {
         Self {
             workspaces,
             border,
+            keyboard,
             outputs,
             autostart,
             keymaps,

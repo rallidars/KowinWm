@@ -1,9 +1,10 @@
 [package]
-name = "KovinWm"
+name = "kovinwm"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tracing-appender = "0.2.4"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 tracing="0.1.41"
 smithay-drm-extras = { git = "https://github.com/Smithay/smithay.git", rev = "fb4fcd18"}

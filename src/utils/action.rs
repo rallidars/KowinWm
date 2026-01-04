@@ -2,11 +2,13 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use smithay::backend::session::Session;
+use smithay::input::keyboard::XkbConfig;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::XdgShellHandler;
 
 use crate::state::State;
-use crate::workspaces::is_fullscreen;
+use crate::utils::config::Config;
+use crate::utils::workspaces::{self, is_fullscreen};
 
 #[derive(PartialEq, Serialize, Deserialize, Clone)]
 #[serde(tag = "action", rename_all = "lowercase")]
@@ -20,6 +22,8 @@ pub enum Action {
     MoveFocus { direction: Direction },
     MoveWindow { direction: Direction },
     VTSwitch(i32),
+    SwitchLayout,
+    ReloadConfig,
 }
 
 #[derive(PartialEq, Serialize, Deserialize, Clone)]
@@ -52,17 +56,37 @@ impl Action {
                     .ok();
             }
             Action::KillActive => {
-                let under = state.surface_under().map(|w| w.0);
-                let toplevel = state
-                    .workspaces
-                    .get_current()
-                    .layout
-                    .iter()
-                    .find(|w| w.wl_surface().as_deref() == under.as_ref())
-                    .and_then(|w| w.toplevel());
-                if let Some(toplevel) = toplevel {
+                let active = match state.workspaces.get_active_window() {
+                    Some(w) => w,
+                    None => return,
+                };
+                if let Some(toplevel) = active.toplevel() {
                     toplevel.send_close();
                 }
+            }
+            Action::ReloadConfig => state.config = Config::get_config().unwrap_or_default(),
+            Action::SwitchLayout => {
+                let keyboard = state.seat.get_keyboard().unwrap();
+                let current_pos = state
+                    .config
+                    .keyboard
+                    .layouts
+                    .iter()
+                    .position(|l| *l == state.current_layout)
+                    .unwrap_or(0);
+                let layout = state
+                    .config
+                    .keyboard
+                    .layouts
+                    .get(current_pos + 1)
+                    .map_or("us".to_string(), |v| v.to_string());
+
+                state.current_layout = layout.clone();
+                let xkb_config = XkbConfig {
+                    layout: &layout,
+                    ..Default::default()
+                };
+                let _ = keyboard.set_xkb_config(state, xkb_config);
             }
             Action::Workspace { index } => {
                 state

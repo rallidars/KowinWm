@@ -8,15 +8,17 @@ use smithay::{
         calloop::{
             generic::Generic, EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
         },
+        wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::wl_surface::WlSurface,
             Display, DisplayHandle,
         },
     },
-    utils::{Logical, Point, Serial, SerialCounter},
+    utils::{Logical, Point, Rectangle, Serial, SerialCounter, Size},
     wayland::{
-        compositor::{CompositorClientState, CompositorState},
+        compositor::{self, CompositorClientState, CompositorState},
+        input_method::InputMethodManagerState,
         seat::WaylandFocus,
         selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
         shell::{
@@ -25,11 +27,12 @@ use smithay::{
         },
         shm::ShmState,
         socket::ListeningSocketSource,
+        xdg_activation::XdgActivationState,
     },
 };
 
-use crate::{backend::udev::UdevData, config::Config, workspaces::Workspaces};
-use crate::{workspaces::is_fullscreen, SERIAL_COUNTER};
+use crate::{backend::udev::UdevData, utils::config::Config, utils::workspaces::Workspaces};
+use crate::{utils::workspaces::is_fullscreen, SERIAL_COUNTER};
 
 pub struct CalloopData {
     pub state: State,
@@ -46,7 +49,11 @@ pub struct State {
     pub compositor_state: CompositorState,
     pub pointer_location: Point<f64, Logical>,
     pub socket_name: OsString,
+
     pub xdg_shell_state: XdgShellState,
+    pub xdg_activation_state: XdgActivationState,
+    pub xdg_decoration_state: XdgDecorationState,
+
     pub pointer: PointerHandle<Self>,
     pub shm_state: ShmState,
     pub seat_state: SeatState<Self>,
@@ -55,9 +62,9 @@ pub struct State {
     pub loop_signal: LoopSignal,
     pub primary_selection_state: PrimarySelectionState,
     pub popup_manager: PopupManager,
-    pub xdg_decoration_state: XdgDecorationState,
     pub layer_shell_state: WlrLayerShellState,
     pub space: Space<Window>,
+    pub current_layout: String,
 }
 
 impl State {
@@ -72,6 +79,7 @@ impl State {
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let mut seat_state: SeatState<Self> = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
@@ -80,8 +88,20 @@ impl State {
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        //InputMethodManagerState::new::<Self, _>(&dh, |_client| true);
+        let config = Config::get_config().unwrap_or_default();
+        let current_layout = config
+            .keyboard
+            .layouts
+            .get(0)
+            .unwrap_or(&"us".to_string())
+            .to_string();
 
-        seat.add_keyboard(XkbConfig::default(), 200, 25).unwrap();
+        let xkb_config = XkbConfig {
+            layout: &current_layout,
+            ..Default::default()
+        };
+        seat.add_keyboard(xkb_config, 200, 25).unwrap();
         let pointer = seat.add_pointer();
         let listening_socket = ListeningSocketSource::new_auto().unwrap();
         let config = Config::get_config().unwrap_or_default();
@@ -129,6 +149,7 @@ impl State {
             start_time,
             compositor_state,
             xdg_shell_state,
+            xdg_activation_state,
             shm_state,
             seat_state,
             data_device_state,
@@ -140,6 +161,7 @@ impl State {
             layer_shell_state,
             space: Space::default(),
             config,
+            current_layout,
         }
     }
 
@@ -161,8 +183,10 @@ impl State {
         let layers = layer_map_for_output(&output);
 
         if let Some(fullscreen) = is_fullscreen(self.space.elements()) {
-            under = fullscreen.surface_under(pos - output_geo.loc.to_f64(), WindowSurfaceType::ALL);
-            // Search from highest to lowest layer for proper occlusion
+            let geo = self.space.element_geometry(fullscreen).unwrap();
+            under = fullscreen
+                .wl_surface()
+                .map(|s| (s.as_ref().clone(), geo.loc - fullscreen.geometry().loc));
         } else if let Some(layer) = layers
             .layer_under(wlr_layer::Layer::Overlay, pos)
             .or_else(|| layers.layer_under(wlr_layer::Layer::Top, pos))
@@ -249,12 +273,18 @@ impl State {
         self.space.refresh();
         let offset = self.config.border.gap + self.config.border.thickness;
         let ws = &mut self.workspaces.get_current_mut();
+        let active = ws.active_window.clone();
 
-        let output = match self.space.outputs().next() {
-            Some(o) => o.clone(),
-            None => return, // no output, nothing to do
+        let output_geometry = self.space.outputs().next().and_then(|o| {
+            let geo = self.space.output_geometry(&o)?;
+            let map = layer_map_for_output(&o);
+            let zone = map.non_exclusive_zone();
+            Some(Rectangle::new(geo.loc + zone.loc, zone.size))
+        });
+        let geo = match output_geometry {
+            Some(g) => g,
+            None => return,
         };
-        let geo = layer_map_for_output(&output).non_exclusive_zone();
 
         let output_width = geo.size.w;
         let output_height = geo.size.h;
@@ -275,6 +305,7 @@ impl State {
         } else {
             output_height
         };
+        let mut focus_window: Option<Window> = None;
 
         for (i, window) in ws.layout.iter().enumerate() {
             let (mut x, mut y) = (0, 0);
@@ -289,16 +320,30 @@ impl State {
                 x = half_width;
                 y = vertical_height * (i as i32 - 1);
             }
+            let loc: Point<i32, Logical> = (x + offset, y + offset).into();
+            let size: Size<i32, Logical> = (width - offset * 2, height - offset * 2).into();
+            let geo = Rectangle::new(loc, size);
+            if geo.contains(self.pointer_location.to_i32_round()) {
+                focus_window = Some(window.clone());
+            }
 
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| {
-                    state.size = Some((width - offset * 2, height - offset * 2).into());
+                    state.bounds = output_geometry.map(|s| s.size);
+                    state.states.set(xdg_toplevel::State::Maximized);
+                    state.size = Some(geo.size);
                 });
                 toplevel.send_configure();
             }
 
-            self.space
-                .map_element(window.clone(), (x + offset, y + offset), false);
+            self.space.map_element(window.clone(), geo.loc, false);
+        }
+
+        if let None = active {
+            ws.active_window = focus_window.clone();
+            self.set_keyboard_focus(
+                focus_window.and_then(|w| w.wl_surface().map(|s| s.as_ref().clone())),
+            );
         }
     }
 }

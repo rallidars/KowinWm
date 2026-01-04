@@ -1,13 +1,17 @@
+mod input;
 mod xdg;
 
-use std::os::fd::OwnedFd;
+use std::{os::fd::OwnedFd, sync::Mutex};
 
-use crate::state::{ClientState, State};
+use crate::{
+    state::{ClientState, State},
+    utils::workspaces::window_center,
+};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
-    delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_decoration,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_input_method_manager, delegate_layer_shell,
+    delegate_output, delegate_primary_selection, delegate_seat, delegate_shm,
+    delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         layer_map_for_output, LayerSurface, PopupKind, PopupManager, Space, Window,
         WindowSurfaceType,
@@ -23,13 +27,14 @@ use smithay::{
             Client, Resource,
         },
     },
-    utils::{Serial, SERIAL_COUNTER},
+    utils::{Rectangle, Serial, SERIAL_COUNTER},
     wayland::{
         buffer::BufferHandler,
         compositor::{
             get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler,
             CompositorState,
         },
+        input_method::{InputMethodHandler, PopupSurface},
         output::OutputHandler,
         seat::WaylandFocus,
         selection::{
@@ -45,8 +50,9 @@ use smithay::{
         shell::{
             wlr_layer::{LayerSurfaceData, WlrLayerShellHandler},
             xdg::{
-                decoration::XdgDecorationHandler, PopupSurface, PositionerState, ToplevelSurface,
+                decoration::XdgDecorationHandler, PositionerState, ToplevelSurface,
                 XdgPopupSurfaceData, XdgShellHandler, XdgShellState, XdgToplevelSurfaceData,
+                XdgToplevelSurfaceRoleAttributes,
             },
         },
         shm::{ShmHandler, ShmState},
@@ -76,7 +82,7 @@ pub fn handle_commit(space: &Space<Window>, surface: &WlSurface, popup_manager: 
         let initial_configure_sent = with_states(surface, |states| {
             states
                 .data_map
-                .get::<XdgToplevelSurfaceData>()
+                .get::<Mutex<XdgToplevelSurfaceRoleAttributes>>()
                 .unwrap()
                 .lock()
                 .unwrap()
@@ -84,7 +90,14 @@ pub fn handle_commit(space: &Space<Window>, surface: &WlSurface, popup_manager: 
         });
 
         if !initial_configure_sent {
-            window.toplevel().unwrap().send_configure();
+            let toplevel = window.toplevel();
+            toplevel.unwrap().with_pending_state(|state| {
+                state.states.set(xdg_toplevel::State::TiledLeft);
+                state.states.set(xdg_toplevel::State::TiledRight);
+                state.states.set(xdg_toplevel::State::TiledTop);
+                state.states.set(xdg_toplevel::State::TiledBottom);
+            });
+            toplevel.unwrap().send_configure();
         }
     }
 
@@ -126,7 +139,18 @@ pub fn handle_commit(space: &Space<Window>, surface: &WlSurface, popup_manager: 
             }
         };
 
-        if !popup.is_initial_configure_sent() {
+        let initial_configure_sent = with_states(surface, |states| {
+            states
+                .data_map
+                .get::<XdgPopupSurfaceData>()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .initial_configure_sent
+        });
+        if !initial_configure_sent {
+            // NOTE: This should never fail as the initial configure is always
+            // allowed.
             popup.send_configure().expect("initial configure failed");
         }
     };
@@ -173,7 +197,7 @@ impl CompositorHandler for State {
         };
         self.popup_manager.commit(surface);
         handle_commit(&self.space, surface, &self.popup_manager);
-        self.set_keyboard_focus_auto();
+        //self.set_keyboard_focus_auto();
     }
 }
 
@@ -205,22 +229,20 @@ impl SeatHandler for State {
             .and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, focus.clone());
         set_primary_focus(dh, seat, focus);
-        //if let Some(w) = self
-        //    .workspaces
-        //    .get_current()
-        //    .space
-        //    .elements()
-        //    .find(|w| w.wl_surface().as_deref() == focused)
-        //{
-        //    for window in self.workspaces.get_current().space.elements() {
-        //        if window.eq(w) {
-        //            window.set_activated(true);
-        //        } else {
-        //            window.set_activated(false);
-        //        }
-        //        window.toplevel().unwrap().send_configure();
-        //    }
-        //}
+        if let Some(w) = self
+            .space
+            .elements()
+            .find(|w| w.wl_surface().as_deref() == focused)
+        {
+            for window in self.space.elements() {
+                if window.eq(w) {
+                    window.set_activated(true);
+                } else {
+                    window.set_activated(false);
+                }
+                window.toplevel().unwrap().send_configure();
+            }
+        }
     }
 
     fn cursor_image(
@@ -265,6 +287,13 @@ impl WlrLayerShellHandler for State {
         }
         self.set_keyboard_focus_auto();
     }
+    fn new_popup(
+        &mut self,
+        parent: smithay::wayland::shell::wlr_layer::LayerSurface,
+        popup: smithay::wayland::shell::xdg::PopupSurface,
+    ) {
+        tracing::info!("layer_new_popup")
+    }
 }
 delegate_layer_shell!(State);
 
@@ -275,3 +304,55 @@ impl PrimarySelectionHandler for State {
 }
 
 delegate_primary_selection!(State);
+
+//impl InputMethodHandler for State {
+//    fn new_popup(&mut self, surface: PopupSurface) {
+//        tracing::info!("new_popup");
+//        let Ok(root) = find_popup_root_surface(&PopupKind::from(surface.clone())) else {
+//            return;
+//        };
+//
+//        let Some(window) = self
+//            .workspaces
+//            .get_current()
+//            .layout
+//            .iter()
+//            .find(|w| w.wl_surface().unwrap().as_ref() == &root)
+//            .clone()
+//        else {
+//            return;
+//        };
+//
+//        let window_geo = window.geometry();
+//
+//        tracing::info!("geometry_new_popup: {:?}", window_geo);
+//
+//        let geometry = positioner.get_unconstrained_geometry(window_geo);
+//
+//        surface.with_pending_state(|state| {
+//            state.geometry = geometry;
+//        });
+//        if let Err(err) = self.popup_manager.track_popup(PopupKind::from(surface)) {
+//            tracing::warn!("Failed to track popup: {}", err);
+//        }
+//    }
+//
+//    fn popup_repositioned(&mut self, _: PopupSurface) {}
+//
+//    fn dismiss_popup(&mut self, surface: PopupSurface) {
+//        if let Some(parent) = surface.get_parent().map(|parent| parent.surface.clone()) {
+//            let _ = PopupManager::dismiss_popup(&parent, &PopupKind::from(surface));
+//        }
+//    }
+//
+//    fn parent_geometry(&self, parent: &WlSurface) -> Rectangle<i32, smithay::utils::Logical> {
+//        self.space
+//            .elements()
+//            .find_map(|window| {
+//                (window.wl_surface().as_deref() == Some(parent)).then(|| window.geometry())
+//            })
+//            .unwrap_or_default()
+//    }
+//}
+//
+//delegate_input_method_manager!(State);

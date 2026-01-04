@@ -1,10 +1,10 @@
 use std::{collections::HashMap, io, path::PathBuf, thread::current, time::Duration};
 
 use crate::{
-    render::CustomRenderElements,
-    shaders::{compile_shaders, BorderShader},
     state::{CalloopData, State},
-    workspaces::is_fullscreen,
+    utils::render::border::{compile_shaders, BorderShader},
+    utils::render::CustomRenderElements,
+    utils::workspaces::is_fullscreen,
 };
 use smithay::{
     backend::{

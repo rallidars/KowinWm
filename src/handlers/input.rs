@@ -15,11 +15,11 @@ use smithay::{
     wayland::shell::wlr_layer,
 };
 
-use crate::{
-    action::{Action, Direction},
-    config::parse_keybind,
-};
 use crate::{state::State, SERIAL_COUNTER};
+use crate::{
+    utils::action::{Action, Direction},
+    utils::config::parse_keybind,
+};
 
 impl State {
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {

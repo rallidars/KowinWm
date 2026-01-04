@@ -11,7 +11,8 @@ use smithay::{
 };
 
 use crate::{
-    action::Direction, config::Config, render::CustomRenderElements, shaders::BorderShader,
+    utils::action::Direction, utils::config::Config, utils::render::border::BorderShader,
+    utils::render::CustomRenderElements,
 };
 
 pub struct Workspace {
@@ -121,6 +122,7 @@ impl Workspaces {
 
     pub fn insert_window(&mut self, window: Window) {
         let ws = self.get_current_mut();
+        ws.active_window = Some(window.clone());
         ws.layout.push(window);
     }
 
