@@ -1,7 +1,7 @@
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, AxisSource, Event, InputBackend, InputEvent, KeyState,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
+        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
     },
     desktop::{layer_map_for_output, WindowSurfaceType},
     input::{
@@ -9,10 +9,13 @@ use smithay::{
             keysyms::{self, KEY_XF86Switch_VT_1, KEY_XF86Switch_VT_12},
             FilterResult,
         },
-        pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
+        pointer::{AxisFrame, ButtonEvent, GrabStartData, MotionEvent, RelativeMotionEvent},
     },
     utils::{Logical, Point},
-    wayland::shell::wlr_layer,
+    wayland::{
+        seat::WaylandFocus,
+        shell::{wlr_layer, xdg::XdgShellHandler},
+    },
 };
 
 use crate::{state::State, SERIAL_COUNTER};
@@ -68,9 +71,10 @@ impl State {
                 }
             }
             InputEvent::PointerMotionAbsolute { event } => {
-                let output = self.space.outputs().next().unwrap().clone();
+                let ws = self.workspaces.get_current();
+                let output = ws.space.outputs().next().unwrap().clone();
 
-                let output_geo = self.space.output_geometry(&output).unwrap();
+                let output_geo = ws.space.output_geometry(&output).unwrap();
 
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
 
@@ -126,11 +130,9 @@ impl State {
             }
             InputEvent::PointerButton { event, .. } => {
                 let pointer = self.seat.get_pointer().unwrap();
-
                 let serial = SERIAL_COUNTER.next_serial();
 
                 let button = event.button_code();
-
                 let button_state = event.state();
 
                 self.set_keyboard_focus_auto();
@@ -183,10 +185,11 @@ impl State {
         }
     }
     fn clamp_coords(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {
+        let ws = self.workspaces.get_current();
         let (pos_x, pos_y) = pos.into();
-        let (max_x, max_y) = self
+        let (max_x, max_y) = ws
             .space
-            .output_geometry(self.space.outputs().next().unwrap())
+            .output_geometry(ws.space.outputs().next().unwrap())
             .unwrap()
             .size
             .into();

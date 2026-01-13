@@ -1,7 +1,12 @@
+use std::cell::RefCell;
+
 use smithay::{
     delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{find_popup_root_surface, PopupKind, Window},
-    input::Seat,
+    input::{
+        pointer::{ClickGrab, Focus},
+        Seat,
+    },
     output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -21,7 +26,13 @@ use smithay::{
     },
 };
 
-use crate::{state::State, utils::workspaces::window_center};
+use crate::{
+    state::State,
+    utils::{
+        grab::{MovePointerGrab, ResizePointerGrub},
+        workspaces::{WindowMode, WindowUserData},
+    },
+};
 
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
@@ -32,22 +43,22 @@ impl XdgShellHandler for State {
         surface: ToplevelSurface,
         wl_output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
     ) {
+        let ws = &mut self.workspaces.get_current_mut();
         let output = wl_output
             .clone()
             .and_then(|o| Output::from_resource(&o))
-            .unwrap_or(self.space.outputs().next().unwrap().clone());
-        let ws = &mut self.workspaces.get_current_mut();
+            .unwrap_or(ws.space.outputs().next().unwrap().clone());
 
-        let window = self
+        let window = ws
             .space
             .elements()
             .find(|w| w.toplevel().map(|s| s == &surface).unwrap_or(false))
             .cloned()
             .unwrap();
-        ws.full_geo = self.space.element_geometry(&window);
+        ws.full_geo = ws.space.element_geometry(&window);
 
-        self.space.map_element(window.clone(), (0, 0), false);
-        let geo = self.space.output_geometry(&output).unwrap();
+        ws.space.map_element(window.clone(), (0, 0), false);
+        let geo = ws.space.output_geometry(&output).unwrap();
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Fullscreen);
             state.size = Some(geo.size);
@@ -58,7 +69,7 @@ impl XdgShellHandler for State {
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
         let ws = &mut self.workspaces.get_current_mut();
-        let window = self
+        let window = ws
             .space
             .elements()
             .find(|w| w.toplevel().map(|s| s == &surface).unwrap_or(false))
@@ -69,7 +80,7 @@ impl XdgShellHandler for State {
             state.size = ws.full_geo.map(|w| w.size);
             state.fullscreen_output.take()
         });
-        self.space
+        ws.space
             .map_element(window, ws.full_geo.unwrap().loc, false);
         self.workspaces.get_current_mut().full_geo = None;
         surface.send_configure();
@@ -78,6 +89,11 @@ impl XdgShellHandler for State {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let window = Window::new_wayland_window(surface);
         self.set_keyboard_focus(window.wl_surface().map(|s| s.as_ref().clone()));
+        window.user_data().insert_if_missing(|| {
+            RefCell::new(WindowUserData {
+                mode: WindowMode::Tiled,
+            })
+        });
         self.workspaces.insert_window(window.clone());
         self.refresh_layout();
     }
@@ -122,7 +138,7 @@ impl XdgShellHandler for State {
             .find(|w| w.toplevel().unwrap() == &surface)
             .unwrap()
             .clone();
-        self.workspaces.remove_window(&window, &mut self.space);
+        self.workspaces.remove_window(&window);
         self.workspaces.get_current_mut().active_window = None;
         self.refresh_layout();
     }
@@ -171,6 +187,85 @@ impl XdgShellHandler for State {
 
         surface.send_repositioned(token);
     }
+
+    fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        let seat: Seat<State> = Seat::from_resource(&seat).unwrap();
+
+        let pointer = seat.get_pointer().unwrap();
+
+        if !pointer.has_grab(serial) {
+            return;
+        }
+        let ws = self.workspaces.get_current_mut();
+
+        let window = match ws.space.elements().find(|element| {
+            element
+                .wl_surface()
+                .map(|s| &*s == surface.wl_surface())
+                .unwrap_or(false)
+        }) {
+            Some(w) => w.clone(),
+            None => return,
+        };
+
+        let start_data = pointer.grab_start_data().unwrap();
+        let start_loc = ws.space.element_location(&window).unwrap();
+
+        let grab = MovePointerGrab {
+            start_data,
+            window,
+            start_loc,
+        };
+        pointer.set_grab(self, grab, serial, Focus::Clear);
+    }
+
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
+        edges: xdg_toplevel::ResizeEdge,
+    ) {
+        let seat: Seat<State> = Seat::from_resource(&seat).unwrap();
+        let pointer = seat.get_pointer().unwrap();
+
+        if !pointer.has_grab(serial) {
+            return;
+        }
+        let ws = self.workspaces.get_current_mut();
+
+        let window = match ws.space.elements().find(|element| {
+            element
+                .wl_surface()
+                .map(|s| &*s == surface.wl_surface())
+                .unwrap_or(false)
+        }) {
+            Some(w) => w.clone(),
+            None => return,
+        };
+
+        let start_data = pointer.grab_start_data().unwrap();
+
+        let window_geo = match ws.space.element_geometry(&window) {
+            Some(l) => l,
+            None => return,
+        };
+
+        let grab = ResizePointerGrub {
+            start_data,
+            window,
+            edges,
+            start_geo: window_geo,
+            last_window_size: window_geo.size,
+        };
+        pointer.set_grab(self, grab, serial, Focus::Clear);
+    }
+    fn ack_configure(
+        &mut self,
+        _surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        _configure: Configure,
+    ) {
+    }
 }
 
 delegate_xdg_shell!(State);
@@ -201,13 +296,14 @@ impl XdgActivationHandler for State {
     ) {
         if token_data.timestamp.elapsed().as_secs() < 10 {
             // Just grant the wish
-            let w = self
+            let ws = self.workspaces.get_current_mut();
+            let w = ws
                 .space
                 .elements()
                 .find(|window| window.wl_surface().map(|s| *s == surface).unwrap_or(false))
                 .cloned();
             if let Some(window) = w {
-                self.space.raise_element(&window, true);
+                ws.space.raise_element(&window, true);
             }
         }
     }

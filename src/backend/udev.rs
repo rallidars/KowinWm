@@ -1,10 +1,16 @@
-use std::{collections::HashMap, io, path::PathBuf, thread::current, time::Duration};
+use std::{
+    cell::RefCell, collections::HashMap, io, path::PathBuf, thread::current, time::Duration,
+};
 
 use crate::{
     state::{CalloopData, State},
-    utils::render::border::{compile_shaders, BorderShader},
-    utils::render::CustomRenderElements,
-    utils::workspaces::is_fullscreen,
+    utils::{
+        render::{
+            border::{compile_shaders, BorderShader},
+            CustomRenderElements,
+        },
+        workspaces::{is_fullscreen, WindowMode, WindowUserData},
+    },
 };
 use smithay::{
     backend::{
@@ -310,9 +316,10 @@ pub fn init_udev() {
 
     event_loop
         .run(None, &mut calloopdata, move |data| {
-            data.state.space.elements().for_each(|e| e.refresh());
+            let ws = data.state.workspaces.get_current();
+            ws.space.elements().for_each(|e| e.refresh());
 
-            let output = data.state.space.outputs().next().unwrap();
+            let output = ws.space.outputs().next().unwrap();
             for layer in layer_map_for_output(output).layers() {
                 layer.send_frame(
                     output,
@@ -426,9 +433,9 @@ impl State {
                 self.display_handle
                     .disable_global::<State>(surface.global_id.clone());
 
-                //for workspace in self.workspaces.workspaces.iter_mut() {
-                self.space.unmap_output(&surface.output)
-                //}
+                for workspace in self.workspaces.workspaces.iter_mut() {
+                    workspace.space.unmap_output(&surface.output)
+                }
             }
         }
     }
@@ -613,7 +620,9 @@ impl State {
                     output: output.clone(),
                     global_id: global,
                 };
-                self.space.map_output(&output, output.current_location());
+                for ws in self.workspaces.workspaces.iter_mut() {
+                    ws.space.map_output(&output, output.current_location());
+                }
 
                 device.surfaces.insert(crtc, surface);
 
@@ -667,7 +676,7 @@ impl State {
             .single_renderer(&device.render_node)
             .unwrap();
         let ws = self.workspaces.get_current();
-        let output = self.space.outputs().next().unwrap();
+        let output = ws.space.outputs().next().unwrap();
 
         let mut renderelements: Vec<CustomRenderElements<_>> = vec![];
         let scale = Scale::from(1.0);
@@ -713,44 +722,95 @@ impl State {
 
         let active_window = &ws.active_window;
         let border_thickness = self.config.border.thickness;
-        let is_full = is_fullscreen(self.space.elements());
+        tracing::info!("workspace: {}", self.workspaces.active_workspace);
+        let is_full = is_fullscreen(ws.space.elements());
         if let Some(win) = is_full {
-            let location = self.space.element_location(win).unwrap();
+            let location = ws.space.element_location(win).unwrap();
             renderelements.extend(
                 win.render_elements(&mut renderer, location.to_physical(1), scale, 1.0)
                     .into_iter()
                     .map(CustomRenderElements::Window),
             );
         } else {
-            for window in self.space.elements() {
-                let mut geo = self.space.element_geometry(&window).unwrap();
-                geo.size += (border_thickness * 2, border_thickness * 2).into();
-                // Shift the location of the top left by the border thickness.
-                geo.loc -= (border_thickness, border_thickness).into();
-                let color = if Some(window) == active_window.as_ref() {
-                    self.config.border.active
-                } else {
-                    self.config.border.inactive
-                };
+            for window in ws.space.elements().rev() {
+                let user_data = window
+                    .user_data()
+                    .get::<RefCell<WindowUserData>>()
+                    .unwrap()
+                    .borrow();
+                match user_data.mode {
+                    WindowMode::Floating => {
+                        let mut geo = ws.space.element_geometry(&window).unwrap();
+                        geo.size += (border_thickness * 2, border_thickness * 2).into();
+                        // Shift the location of the top left by the border thickness.
+                        geo.loc -= (border_thickness, border_thickness).into();
+                        let color = if Some(window) == active_window.as_ref() {
+                            self.config.border.active
+                        } else {
+                            self.config.border.inactive
+                        };
 
-                let border = BorderShader::element(
-                    renderer.as_mut(),
-                    geo,
-                    1.0,
-                    color,
-                    border_thickness as f32,
-                );
+                        let border = BorderShader::element(
+                            renderer.as_mut(),
+                            geo,
+                            1.0,
+                            color,
+                            border_thickness as f32,
+                        );
 
-                renderelements.push(CustomRenderElements::Shader(border));
-                let location =
-                    self.space.element_location(&window).unwrap() - window.geometry().loc;
+                        renderelements.push(CustomRenderElements::Shader(border));
+                        let location =
+                            ws.space.element_location(&window).unwrap() - window.geometry().loc;
 
-                renderelements.extend(
-                    window
-                        .render_elements(&mut renderer, location.to_physical(1), scale, 1.0)
-                        .into_iter()
-                        .map(CustomRenderElements::Window),
-                );
+                        renderelements.extend(
+                            window
+                                .render_elements(&mut renderer, location.to_physical(1), scale, 1.0)
+                                .into_iter()
+                                .map(CustomRenderElements::Window),
+                        );
+                    }
+                    _ => continue,
+                }
+            }
+            for window in ws.space.elements().rev() {
+                let user_data = window
+                    .user_data()
+                    .get::<RefCell<WindowUserData>>()
+                    .unwrap()
+                    .borrow();
+                match user_data.mode {
+                    WindowMode::Tiled => {
+                        let mut geo = ws.space.element_geometry(&window).unwrap();
+                        geo.size += (border_thickness * 2, border_thickness * 2).into();
+                        // Shift the location of the top left by the border thickness.
+                        geo.loc -= (border_thickness, border_thickness).into();
+                        let color = if Some(window) == active_window.as_ref() {
+                            self.config.border.active
+                        } else {
+                            self.config.border.inactive
+                        };
+
+                        let border = BorderShader::element(
+                            renderer.as_mut(),
+                            geo,
+                            1.0,
+                            color,
+                            border_thickness as f32,
+                        );
+
+                        renderelements.push(CustomRenderElements::Shader(border));
+                        let location =
+                            ws.space.element_location(&window).unwrap() - window.geometry().loc;
+
+                        renderelements.extend(
+                            window
+                                .render_elements(&mut renderer, location.to_physical(1), scale, 1.0)
+                                .into_iter()
+                                .map(CustomRenderElements::Window),
+                        );
+                    }
+                    _ => continue,
+                }
             }
         }
 
@@ -862,7 +922,7 @@ impl State {
                 .expect("failed to schedule frame timer");
         }
 
-        self.space.elements().for_each(|window| {
+        ws.space.elements().for_each(|window| {
             window.send_frame(
                 output,
                 self.start_time.elapsed(),

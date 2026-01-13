@@ -1,40 +1,31 @@
 mod input;
 mod xdg;
+#[cfg(feature = "xwayland")]
+mod xwayland;
 
 use std::{os::fd::OwnedFd, sync::Mutex};
 
-use crate::{
-    state::{ClientState, State},
-    utils::workspaces::window_center,
-};
+use crate::state::{ClientState, State};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_input_method_manager, delegate_layer_shell,
-    delegate_output, delegate_primary_selection, delegate_seat, delegate_shm,
-    delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
+    delegate_primary_selection, delegate_seat, delegate_shm,
     desktop::{
         layer_map_for_output, LayerSurface, PopupKind, PopupManager, Space, Window,
         WindowSurfaceType,
     },
     input::{Seat, SeatHandler, SeatState},
     output::Output,
-    reexports::{
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
-        wayland_server::{
-            protocol::{
-                wl_buffer, wl_seat, wl_shell_surface::FullscreenMethod, wl_surface::WlSurface,
-            },
-            Client, Resource,
-        },
+    reexports::wayland_server::{
+        protocol::{wl_buffer, wl_surface::WlSurface},
+        Client, Resource,
     },
-    utils::{Rectangle, Serial, SERIAL_COUNTER},
     wayland::{
         buffer::BufferHandler,
         compositor::{
             get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler,
             CompositorState,
         },
-        input_method::{InputMethodHandler, PopupSurface},
         output::OutputHandler,
         seat::WaylandFocus,
         selection::{
@@ -49,11 +40,7 @@ use smithay::{
         },
         shell::{
             wlr_layer::{LayerSurfaceData, WlrLayerShellHandler},
-            xdg::{
-                decoration::XdgDecorationHandler, PositionerState, ToplevelSurface,
-                XdgPopupSurfaceData, XdgShellHandler, XdgShellState, XdgToplevelSurfaceData,
-                XdgToplevelSurfaceRoleAttributes,
-            },
+            xdg::{XdgPopupSurfaceData, XdgToplevelSurfaceRoleAttributes},
         },
         shm::{ShmHandler, ShmState},
     },
@@ -90,14 +77,7 @@ pub fn handle_commit(space: &Space<Window>, surface: &WlSurface, popup_manager: 
         });
 
         if !initial_configure_sent {
-            let toplevel = window.toplevel();
-            toplevel.unwrap().with_pending_state(|state| {
-                state.states.set(xdg_toplevel::State::TiledLeft);
-                state.states.set(xdg_toplevel::State::TiledRight);
-                state.states.set(xdg_toplevel::State::TiledTop);
-                state.states.set(xdg_toplevel::State::TiledBottom);
-            });
-            toplevel.unwrap().send_configure();
+            window.toplevel().unwrap().send_configure();
         }
     }
 
@@ -133,7 +113,7 @@ pub fn handle_commit(space: &Space<Window>, surface: &WlSurface, popup_manager: 
     if let Some(popup) = popup_manager.find_popup(surface) {
         let popup = match popup {
             PopupKind::Xdg(ref popup) => popup,
-            // Doesn't require configure
+
             PopupKind::InputMethod(ref _input_popup) => {
                 return;
             }
@@ -182,12 +162,13 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        let ws = self.workspaces.get_current();
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
-            if let Some(window) = self
+            if let Some(window) = ws
                 .space
                 .elements()
                 .find(|w| w.toplevel().unwrap().wl_surface() == &root)
@@ -196,7 +177,7 @@ impl CompositorHandler for State {
             }
         };
         self.popup_manager.commit(surface);
-        handle_commit(&self.space, surface, &self.popup_manager);
+        handle_commit(&ws.space, surface, &self.popup_manager);
         //self.set_keyboard_focus_auto();
     }
 }
@@ -229,12 +210,13 @@ impl SeatHandler for State {
             .and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, focus.clone());
         set_primary_focus(dh, seat, focus);
-        if let Some(w) = self
+        let ws = self.workspaces.get_current();
+        if let Some(w) = ws
             .space
             .elements()
             .find(|w| w.wl_surface().as_deref() == focused)
         {
-            for window in self.space.elements() {
+            for window in ws.space.elements() {
                 if window.eq(w) {
                     window.set_activated(true);
                 } else {
@@ -258,13 +240,14 @@ impl WlrLayerShellHandler for State {
         &mut self,
         surface: smithay::wayland::shell::wlr_layer::LayerSurface,
         output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
-        layer: smithay::wayland::shell::wlr_layer::Layer,
+        _layer: smithay::wayland::shell::wlr_layer::Layer,
         namespace: String,
     ) {
+        let ws = self.workspaces.get_current();
         let output = output
             .as_ref()
             .and_then(Output::from_resource)
-            .unwrap_or_else(|| self.space.outputs().next().unwrap().clone());
+            .unwrap_or_else(|| ws.space.outputs().next().unwrap().clone());
         let mut map = layer_map_for_output(&output);
         let layer_surface = LayerSurface::new(surface, namespace);
         map.map_layer(&layer_surface).unwrap();
@@ -275,7 +258,8 @@ impl WlrLayerShellHandler for State {
         &mut self.layer_shell_state
     }
     fn layer_destroyed(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface) {
-        if let Some((mut map, layer)) = self.space.outputs().find_map(|o| {
+        let ws = self.workspaces.get_current();
+        if let Some((mut map, layer)) = ws.space.outputs().find_map(|o| {
             let map = layer_map_for_output(o);
             let layer = map
                 .layers()

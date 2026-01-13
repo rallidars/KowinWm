@@ -31,3 +31,7 @@ features = [
     "use_system_lib",
 ]
 
+
+[features]
+default=[]
+xwayland = ["smithay/xwayland"]

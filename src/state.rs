@@ -1,8 +1,10 @@
-use std::{ffi::OsString, sync::Arc, time::Instant};
+use std::{cell::RefCell, ffi::OsString, sync::Arc, time::Instant};
 
 use smithay::{
     backend::session::Session,
-    desktop::{layer_map_for_output, PopupManager, Space, Window, WindowSurfaceType},
+    desktop::{
+        layer_map_for_output, space::SpaceElement, PopupManager, Space, Window, WindowSurfaceType,
+    },
     input::{keyboard::XkbConfig, pointer::PointerHandle, Seat, SeatState},
     reexports::{
         calloop::{
@@ -31,7 +33,16 @@ use smithay::{
     },
 };
 
-use crate::{backend::udev::UdevData, utils::config::Config, utils::workspaces::Workspaces};
+#[cfg(feature = "xwayland")]
+use smithay::{wayland::xwayland_shell, xwayland::X11Wm};
+
+use crate::{
+    backend::udev::UdevData,
+    utils::{
+        config::Config,
+        workspaces::{place_on_center, WindowMode, WindowUserData, Workspaces},
+    },
+};
 use crate::{utils::workspaces::is_fullscreen, SERIAL_COUNTER};
 
 pub struct CalloopData {
@@ -63,8 +74,15 @@ pub struct State {
     pub primary_selection_state: PrimarySelectionState,
     pub popup_manager: PopupManager,
     pub layer_shell_state: WlrLayerShellState,
-    pub space: Space<Window>,
     pub current_layout: String,
+
+    #[cfg(feature = "xwayland")]
+    pub xwayland_shell_state: xwayland_shell::XWaylandShellState,
+
+    #[cfg(feature = "xwayland")]
+    pub xwm: Option<X11Wm>,
+    #[cfg(feature = "xwayland")]
+    pub xdisplay: Option<u32>,
 }
 
 impl State {
@@ -109,6 +127,9 @@ impl State {
         // Get the name of the listening socket.
         // Clients will connect to this socket.
         let socket_name = listening_socket.socket_name().to_os_string();
+
+        #[cfg(feature = "xwayland")]
+        let xwayland_shell_state = xwayland_shell::XWaylandShellState::new::<Self>(&dh.clone());
 
         loop_handle
             .insert_source(listening_socket, move |client_stream, _, state| {
@@ -159,9 +180,15 @@ impl State {
             xdg_decoration_state,
             primary_selection_state,
             layer_shell_state,
-            space: Space::default(),
             config,
             current_layout,
+
+            #[cfg(feature = "xwayland")]
+            xwayland_shell_state,
+            #[cfg(feature = "xwayland")]
+            xwm: None,
+            #[cfg(feature = "xwayland")]
+            xdisplay: None,
         }
     }
 
@@ -173,17 +200,17 @@ impl State {
     )> {
         let ws = self.workspaces.get_current();
         let pos = self.pointer_location;
-        let output = self.space.outputs().find(|o| {
-            let geometry = self.space.output_geometry(o).unwrap();
+        let output = ws.space.outputs().find(|o| {
+            let geometry = ws.space.output_geometry(o).unwrap();
             geometry.contains(pos.to_i32_round())
         })?;
-        let output_geo = self.space.output_geometry(output).unwrap();
+        let output_geo = ws.space.output_geometry(output).unwrap();
 
         let mut under = None;
         let layers = layer_map_for_output(&output);
 
-        if let Some(fullscreen) = is_fullscreen(self.space.elements()) {
-            let geo = self.space.element_geometry(fullscreen).unwrap();
+        if let Some(fullscreen) = is_fullscreen(ws.space.elements()) {
+            let geo = ws.space.element_geometry(fullscreen).unwrap();
             under = fullscreen
                 .wl_surface()
                 .map(|s| (s.as_ref().clone(), geo.loc - fullscreen.geometry().loc));
@@ -234,19 +261,34 @@ impl State {
         smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
         Point<i32, Logical>,
     )> {
-        let offset = self.config.border.gap + self.config.border.thickness;
-        for element in self.space.elements() {
-            let geo = self.space.element_geometry(element)?;
-            let mut offset_geo = geo;
-            offset_geo.size += (offset * 2, offset * 2).into();
-            offset_geo.loc -= (offset, offset).into();
-            if offset_geo.contains(self.pointer_location.to_i32_round()) {
-                return element
-                    .wl_surface()
-                    .map(|s| (s.as_ref().clone(), geo.loc - element.geometry().loc));
+        let ws = self.workspaces.get_current();
+
+        let mut tiled_hit = None;
+
+        // Iterate top → bottom (important for correct stacking)
+        for element in ws.space.elements().rev() {
+            if let Some(hit) = self.window_contains_pointer(element) {
+                match element
+                    .user_data()
+                    .get::<RefCell<WindowUserData>>()
+                    .unwrap()
+                    .borrow()
+                    .mode
+                {
+                    // Floating windows always win immediately
+                    WindowMode::Floating => return Some(hit),
+
+                    // Remember first tiled hit (topmost tiled)
+                    WindowMode::Tiled if tiled_hit.is_none() => {
+                        tiled_hit = Some(hit);
+                    }
+
+                    _ => {}
+                }
             }
         }
-        None
+
+        tiled_hit
     }
 
     pub fn set_keyboard_focus(&mut self, surface: Option<WlSurface>) {
@@ -258,25 +300,28 @@ impl State {
 
     pub fn set_keyboard_focus_auto(&mut self) {
         if let Some(under) = self.surface_under().map(|s| s.0) {
-            let active = self
-                .workspaces
-                .get_current()
+            let ws = self.workspaces.get_current_mut();
+            let active = ws
                 .layout
                 .iter()
                 .find(|w| w.wl_surface().map(|s| *s == under).unwrap_or(false));
-            self.workspaces.set_active_window(active.cloned());
+
+            if let Some(a) = active {
+                ws.space.raise_element(a, false);
+            }
+            ws.active_window = active.cloned();
             self.set_keyboard_focus(Some(under));
         }
     }
 
     pub fn refresh_layout(&mut self) {
-        self.space.refresh();
+        let ws = self.workspaces.get_current_mut();
+        ws.space.refresh();
         let offset = self.config.border.gap + self.config.border.thickness;
-        let ws = &mut self.workspaces.get_current_mut();
         let active = ws.active_window.clone();
 
-        let output_geometry = self.space.outputs().next().and_then(|o| {
-            let geo = self.space.output_geometry(&o)?;
+        let output_geometry = ws.space.outputs().next().and_then(|o| {
+            let geo = ws.space.output_geometry(&o)?;
             let map = layer_map_for_output(&o);
             let zone = map.non_exclusive_zone();
             Some(Rectangle::new(geo.loc + zone.loc, zone.size))
@@ -289,7 +334,19 @@ impl State {
         let output_width = geo.size.w;
         let output_height = geo.size.h;
 
-        let count = ws.layout.len() as i32;
+        let tiled_windows: Vec<Window> = ws
+            .layout
+            .iter()
+            .filter(|w| {
+                w.user_data()
+                    .get::<RefCell<WindowUserData>>()
+                    .map(|d| d.borrow().mode == WindowMode::Tiled)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+
+        let count = tiled_windows.len() as i32;
 
         if count == 0 {
             return;
@@ -307,7 +364,7 @@ impl State {
         };
         let mut focus_window: Option<Window> = None;
 
-        for (i, window) in ws.layout.iter().enumerate() {
+        for (i, window) in tiled_windows.iter().enumerate() {
             let (mut x, mut y) = (0, 0);
             let (mut width, mut height) = (output_width, output_height);
 
@@ -320,8 +377,8 @@ impl State {
                 x = half_width;
                 y = vertical_height * (i as i32 - 1);
             }
-            let loc: Point<i32, Logical> = (x + offset, y + offset).into();
-            let size: Size<i32, Logical> = (width - offset * 2, height - offset * 2).into();
+            let loc: Point<i32, Logical> = (x, y).into();
+            let size: Size<i32, Logical> = (width, height).into();
             let geo = Rectangle::new(loc, size);
             if geo.contains(self.pointer_location.to_i32_round()) {
                 focus_window = Some(window.clone());
@@ -331,12 +388,38 @@ impl State {
                 toplevel.with_pending_state(|state| {
                     state.bounds = output_geometry.map(|s| s.size);
                     state.states.set(xdg_toplevel::State::Maximized);
-                    state.size = Some(geo.size);
+                    state.size = Some((geo.size.w - offset * 2, geo.size.h - offset * 2).into());
                 });
                 toplevel.send_configure();
             }
 
-            self.space.map_element(window.clone(), geo.loc, false);
+            ws.space.map_element(
+                window.clone(),
+                (geo.loc.x + offset, geo.loc.y + offset),
+                false,
+            );
+        }
+
+        let floating_windows: Vec<Window> = ws
+            .layout
+            .iter()
+            .filter(|w| {
+                w.user_data()
+                    .get::<RefCell<WindowUserData>>()
+                    .map(|d| d.borrow().mode == WindowMode::Floating)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+
+        for window in floating_windows {
+            if let Some(geometry) = ws.space.element_geometry(&window) {
+                if geometry.contains(self.pointer_location.to_i32_round()) {
+                    focus_window = Some(window.clone());
+                }
+                ws.space.map_element(window.clone(), geometry.loc, false);
+            } else {
+            }
         }
 
         if let None = active {
@@ -345,6 +428,29 @@ impl State {
                 focus_window.and_then(|w| w.wl_surface().map(|s| s.as_ref().clone())),
             );
         }
+    }
+    pub fn window_contains_pointer(
+        &self,
+        window: &Window,
+    ) -> Option<(
+        smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        Point<i32, Logical>,
+    )> {
+        let offset = self.config.border.thickness + self.config.border.gap;
+        let ws = self.workspaces.get_current();
+        let geo = ws.space.element_geometry(window)?;
+
+        let mut offset_geo = geo;
+        offset_geo.size += (offset * 2, offset * 2).into();
+        offset_geo.loc -= (offset, offset).into();
+
+        if offset_geo.contains(self.pointer_location.to_i32_round()) {
+            return window
+                .wl_surface()
+                .map(|s| (s.as_ref().clone(), geo.loc - window.geometry().loc));
+        }
+
+        None
     }
 }
 
