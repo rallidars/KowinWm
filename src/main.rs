@@ -1,6 +1,6 @@
-mod backend;
 mod handlers;
 mod state;
+mod udev;
 mod utils;
 use smithay::utils::SerialCounter;
 
@@ -11,7 +11,7 @@ pub static SERIAL_COUNTER: SerialCounter = SerialCounter::new();
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logs();
 
-    backend::udev::init_udev();
+    udev::init_udev();
 
     Ok(())
 }

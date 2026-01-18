@@ -2,11 +2,11 @@ use std::cell::RefCell;
 
 use smithay::{
     delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
-    desktop::{find_popup_root_surface, PopupKind, Window},
-    input::{
-        pointer::{ClickGrab, Focus},
-        Seat,
+    desktop::{
+        find_popup_root_surface, layer_map_for_output, PopupKeyboardGrab, PopupKind,
+        PopupPointerGrab, PopupUngrabStrategy, Window, WindowSurfaceType,
     },
+    input::{pointer::Focus, Seat},
     output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -14,11 +14,10 @@ use smithay::{
     },
     utils::Serial,
     wayland::{
-        compositor::with_states,
         seat::WaylandFocus,
         shell::xdg::{
             decoration::XdgDecorationHandler, Configure, PopupSurface, PositionerState,
-            ToplevelConfigure, ToplevelSurface, XdgShellHandler, XdgShellState,
+            ToplevelSurface, XdgShellHandler, XdgShellState,
         },
         xdg_activation::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
@@ -144,13 +143,51 @@ impl XdgShellHandler for State {
     }
 
     fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
-        tracing::info!("geometry_reposition_requesty");
         let seat: Seat<State> = Seat::from_resource(&seat).unwrap();
         let kind = PopupKind::Xdg(surface);
-        let root = find_popup_root_surface(&kind).unwrap();
-        self.popup_manager
-            .grab_popup(root, kind, &seat, serial)
-            .unwrap();
+        if let Some(root) = find_popup_root_surface(&kind).ok().and_then(|root| {
+            let ws = self.workspaces.get_current();
+            ws.space
+                .elements()
+                .find(|w| w.wl_surface().map(|s| *s == root).unwrap_or(false))
+                .cloned()
+                .map(|w| w.wl_surface().unwrap().as_ref().clone())
+                .or_else(|| {
+                    ws.space.outputs().find_map(|o| {
+                        let map = layer_map_for_output(o);
+                        map.layer_for_surface(&root, WindowSurfaceType::TOPLEVEL)
+                            .cloned()
+                            .map(|l| l.wl_surface().clone())
+                    })
+                })
+        }) {
+            let ret = self.popup_manager.grab_popup(root, kind, &seat, serial);
+
+            if let Ok(mut grab) = ret {
+                if let Some(keyboard) = seat.get_keyboard() {
+                    if keyboard.is_grabbed()
+                        && !(keyboard.has_grab(serial)
+                            || keyboard.has_grab(grab.previous_serial().unwrap_or(serial)))
+                    {
+                        grab.ungrab(PopupUngrabStrategy::All);
+                        return;
+                    }
+                    keyboard.set_focus(self, grab.current_grab(), serial);
+                    keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+                }
+                if let Some(pointer) = seat.get_pointer() {
+                    if pointer.is_grabbed()
+                        && !(pointer.has_grab(serial)
+                            || pointer
+                                .has_grab(grab.previous_serial().unwrap_or_else(|| grab.serial())))
+                    {
+                        grab.ungrab(PopupUngrabStrategy::All);
+                        return;
+                    }
+                    pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+                }
+            }
+        }
     }
 
     fn reposition_request(
@@ -265,6 +302,7 @@ impl XdgShellHandler for State {
         _surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
         _configure: Configure,
     ) {
+        tracing::info!("ack_configure request");
     }
 }
 

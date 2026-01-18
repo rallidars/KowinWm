@@ -1,9 +1,7 @@
-use std::{
-    cell::RefCell, collections::HashMap, io, path::PathBuf, thread::current, time::Duration,
-};
+use std::{cell::RefCell, collections::HashMap, io, path::PathBuf, time::Duration};
 
 use crate::{
-    state::{CalloopData, State},
+    state::State,
     utils::{
         render::{
             border::{compile_shaders, BorderShader},
@@ -28,7 +26,6 @@ use smithay::{
         egl::{EGLDevice, EGLDisplay},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
-            damage::OutputDamageTracker,
             element::{
                 surface::WaylandSurfaceRenderElement,
                 texture::{TextureBuffer, TextureRenderElement},
@@ -60,7 +57,7 @@ use smithay::{
         },
         input::Libinput,
         rustix::fs::OFlags,
-        wayland_server::{backend::GlobalId, Display, DisplayHandle},
+        wayland_server::{backend::GlobalId, protocol::wl_surface, Display, DisplayHandle},
     },
     utils::{DeviceFd, Scale, Transform},
     wayland::{
@@ -69,7 +66,7 @@ use smithay::{
     },
 };
 use smithay_drm_extras::{
-    display_info::for_connector,
+    display_info::{self, for_connector},
     drm_scanner::{DrmScanEvent, DrmScanner},
 };
 
@@ -86,7 +83,6 @@ pub struct UdevData {
     gpus: GpuManager<GbmGlesBackend<GlowRenderer, DrmDeviceFd>>,
     devices: HashMap<DrmNode, Device>,
     dmabuf_state: Option<(DmabufState, DmabufGlobal)>,
-    //damage_tracker: Option<OutputDamageTracker>,
 }
 
 impl DmabufHandler for State {
@@ -115,6 +111,14 @@ impl DmabufHandler for State {
 }
 delegate_dmabuf!(State);
 
+impl UdevData {
+    pub fn early_import(&mut self, surface: &wl_surface::WlSurface) {
+        if let Err(err) = self.gpus.early_import(self.primary_gpu, surface) {
+            tracing::warn!("Early buffer import failed: {}", err);
+        }
+    }
+}
+
 pub struct Device {
     pub surfaces: HashMap<crtc::Handle, Surface>,
     pub gbm: GbmDevice<DrmDeviceFd>,
@@ -124,7 +128,7 @@ pub struct Device {
     pub registration_token: RegistrationToken,
 }
 
-pub static FALLBACK_CURSOR_DATA: &[u8] = include_bytes!("../../resources/cursor.rgba");
+pub static FALLBACK_CURSOR_DATA: &[u8] = include_bytes!("../resources/cursor.rgba");
 pub struct Surface {
     _device_id: DrmNode,
     _render_node: DrmNode,
@@ -140,9 +144,8 @@ pub struct Surface {
 }
 
 pub fn init_udev() {
-    let mut event_loop: EventLoop<CalloopData> = EventLoop::try_new().unwrap();
+    let mut event_loop: EventLoop<State> = EventLoop::try_new().unwrap();
     let display: Display<State> = Display::new().unwrap();
-    let mut display_handle: DisplayHandle = display.handle().clone();
     /*
      Initialize session
     */
@@ -169,10 +172,17 @@ pub fn init_udev() {
         gpus,
         devices: HashMap::new(),
         dmabuf_state: None,
-        //damage_tracker: None,
     };
 
+    /*
+     * Initialize libinput state
+     */
+
     let mut state = State::new(event_loop.handle(), event_loop.get_signal(), display, data);
+
+    /*
+     * Initialize libinput backend
+     */
     let mut libinput_context = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(
         state.backend_data.session.clone().into(),
     );
@@ -182,10 +192,13 @@ pub fn init_udev() {
 
     let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
 
+    /*
+     * Bind all our objects that get driven by the event loop
+     */
     event_loop
         .handle()
-        .insert_source(libinput_backend, move |event, _, calloopdata| {
-            calloopdata.state.process_input_event(event);
+        .insert_source(libinput_backend, move |event, _, data| {
+            data.process_input_event(event);
         })
         .unwrap();
 
@@ -194,7 +207,7 @@ pub fn init_udev() {
         .insert_source(seat_notifier, move |event, _, data| match event {
             SessionEvent::PauseSession => {
                 libinput_context.suspend();
-                for backend in data.state.backend_data.devices.values_mut() {
+                for backend in data.backend_data.devices.values_mut() {
                     backend.drm.pause();
                 }
                 tracing::info!("pausing session");
@@ -206,7 +219,6 @@ pub fn init_udev() {
                     tracing::error!("Failed to resume libinput context: {:?}", err);
                 }
                 for (node, backend) in data
-                    .state
                     .backend_data
                     .devices
                     .iter_mut()
@@ -227,17 +239,13 @@ pub fn init_udev() {
                         // has no content and damage tracking may prevent a redraw
                         // otherwise
                         surface.compositor.reset_buffers();
-                        data.state.loop_handle.insert_idle(move |data| {
+                        data.loop_handle.insert_idle(move |data| {
                             if let Some(SwapBuffersError::ContextLost(_)) =
-                                data.state.render(node, crtc).err()
+                                data.render(node, crtc).err()
                             {
                                 tracing::info!("Context lost on device {}, re-creating", node);
-                                data.state.on_device_removed(node);
-                                data.state.on_device_added(
-                                    node,
-                                    node.dev_path().unwrap(),
-                                    &mut data.display_handle,
-                                );
+                                data.on_device_removed(node);
+                                data.on_device_added(node, node.dev_path().unwrap());
                             }
                         });
                     }
@@ -252,21 +260,16 @@ pub fn init_udev() {
     let backend = UdevBackend::new(&state.backend_data.session.seat()).unwrap();
     for (device_id, path) in backend.device_list() {
         tracing::info!("udev device {}", path.display());
-        state.on_udev_event(
-            UdevEvent::Added {
-                device_id,
-                path: path.to_owned(),
-            },
-            &mut display_handle,
-        );
+        state.on_udev_event(UdevEvent::Added {
+            device_id,
+            path: path.to_owned(),
+        });
     }
 
     event_loop
         .handle()
         .insert_source(backend, |event, _, calloopdata| {
-            calloopdata
-                .state
-                .on_udev_event(event, &mut calloopdata.display_handle)
+            calloopdata.on_udev_event(event)
         })
         .unwrap();
 
@@ -280,7 +283,7 @@ pub fn init_udev() {
         ?primary_gpu,
         "Trying to initialize EGL Hardware Acceleration",
     );
-    match renderer.bind_wl_display(&display_handle) {
+    match renderer.bind_wl_display(&state.display_handle) {
         Ok(_) => tracing::info!("EGL hardware-acceleration enabled"),
         Err(err) => tracing::info!(?err, "Failed to initialize EGL hardware-acceleration"),
     }
@@ -292,18 +295,25 @@ pub fn init_udev() {
         .unwrap();
     let mut dmabuf_state = DmabufState::new();
     let global = dmabuf_state
-        .create_global_with_default_feedback::<State>(&display_handle, &default_feedback);
+        .create_global_with_default_feedback::<State>(&state.display_handle, &default_feedback);
     state.backend_data.dmabuf_state = Some((dmabuf_state, global));
 
     let autostart = state.config.autostart.clone();
-    let mut calloopdata = CalloopData {
-        state,
-        display_handle,
-    };
 
     unsafe {
-        std::env::set_var("WAYLAND_DISPLAY", &calloopdata.state.socket_name);
+        std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
     }
+
+    /*
+     * Start XWayland if supported
+     */
+
+    #[cfg(feature = "xwayland")]
+    state.start_xwayland();
+
+    /*
+     * And run our loop
+     */
 
     for program in autostart {
         std::process::Command::new("/bin/sh")
@@ -314,39 +324,59 @@ pub fn init_udev() {
             .ok();
     }
 
+    //while state.running.load(Ordering::SeqCst) {
+    //    let result = event_loop.dispatch(Some(Duration::from_millis(16)), &mut state);
+    //    if result.is_err() {
+    //        state.running.store(false, Ordering::SeqCst);
+    //    } else {
+    //        let ws = state.workspaces.get_current_mut();
+    //        ws.space.refresh();
+    //        state.popup_manager.cleanup();
+    //        display_handle
+    //            .flush_clients()
+    //            .expect("Failde flush clients");
+    //    }
+    //}
     event_loop
-        .run(None, &mut calloopdata, move |data| {
-            let ws = data.state.workspaces.get_current();
-            ws.space.elements().for_each(|e| e.refresh());
+        .run(None, &mut state, move |data| {
+            for ws in data.workspaces.workspaces.iter() {
+                ws.space.elements().for_each(|e| e.refresh());
+            }
 
-            let output = ws.space.outputs().next().unwrap();
+            let output = data
+                .workspaces
+                .get_current()
+                .space
+                .outputs()
+                .next()
+                .unwrap();
             for layer in layer_map_for_output(output).layers() {
                 layer.send_frame(
                     output,
-                    data.state.start_time.elapsed(),
+                    data.start_time.elapsed(),
                     Some(Duration::ZERO),
                     |_, _| Some(output.clone()),
                 );
             }
 
             data.display_handle.flush_clients().unwrap();
-            data.state.popup_manager.cleanup();
+            data.popup_manager.cleanup();
         })
         .unwrap();
 }
 
 // Udev
 impl State {
-    pub fn on_udev_event(&mut self, event: UdevEvent, display: &mut DisplayHandle) {
+    pub fn on_udev_event(&mut self, event: UdevEvent) {
         match event {
             UdevEvent::Added { device_id, path } => {
                 if let Ok(node) = DrmNode::from_dev_id(device_id) {
-                    self.on_device_added(node, path, display);
+                    self.on_device_added(node, path);
                 }
             }
             UdevEvent::Changed { device_id } => {
                 if let Ok(node) = DrmNode::from_dev_id(device_id) {
-                    self.on_device_changed(node, display);
+                    self.on_device_changed(node);
                 }
             }
             UdevEvent::Removed { device_id } => {
@@ -357,7 +387,7 @@ impl State {
         }
     }
 
-    fn on_device_added(&mut self, node: DrmNode, path: PathBuf, display: &mut DisplayHandle) {
+    fn on_device_added(&mut self, node: DrmNode, path: PathBuf) {
         let fd = self
             .backend_data
             .session
@@ -374,14 +404,17 @@ impl State {
         let gbm = gbm::GbmDevice::new(drm.device_fd().clone()).unwrap();
 
         // Make sure display is dropped before we call add_node
-        let egl_display = unsafe { EGLDisplay::new(gbm.clone()).unwrap() };
 
-        let render_node = match EGLDevice::device_for_display(&egl_display)
-            .ok()
-            .and_then(|x| x.try_get_render_node().ok().flatten())
-        {
-            Some(node) => node,
-            None => node,
+        let render_node = {
+            let egl_display = unsafe { EGLDisplay::new(gbm.clone()).unwrap() };
+
+            match EGLDevice::device_for_display(&egl_display)
+                .ok()
+                .and_then(|x| x.try_get_render_node().ok().flatten())
+            {
+                Some(node) => node,
+                None => node,
+            }
         };
 
         self.backend_data
@@ -393,7 +426,7 @@ impl State {
         let registration_token = self
             .loop_handle
             .insert_source(drm_notifier, move |event, meta, calloopdata| {
-                calloopdata.state.on_drm_event(node, event, meta);
+                calloopdata.on_drm_event(node, event, meta);
             })
             .unwrap();
 
@@ -409,16 +442,16 @@ impl State {
             },
         );
 
-        self.on_device_changed(node, display);
+        self.on_device_changed(node);
     }
-    fn on_device_changed(&mut self, node: DrmNode, display: &mut DisplayHandle) {
+    fn on_device_changed(&mut self, node: DrmNode) {
         if let Some(device) = self.backend_data.devices.get_mut(&node) {
             for event in device
                 .drm_scanner
                 .scan_connectors(&device.drm)
                 .expect("scan")
             {
-                self.on_connector_event(node, event, display);
+                self.on_connector_event(node, event);
             }
         }
     }
@@ -461,12 +494,7 @@ impl State {
         }
     }
 
-    pub fn on_connector_event(
-        &mut self,
-        node: DrmNode,
-        event: DrmScanEvent,
-        display: &mut DisplayHandle,
-    ) {
+    pub fn on_connector_event(&mut self, node: DrmNode, event: DrmScanEvent) {
         let device = if let Some(device) = self.backend_data.devices.get_mut(&node) {
             device
         } else {
@@ -511,21 +539,29 @@ impl State {
                     .create_surface(crtc, drm_mode, &[connector.handle()])
                     .unwrap();
 
-                let (make, model) = for_connector(&device.drm, connector.handle())
-                    .map(|info| (info.make().unwrap(), info.model().unwrap()))
-                    .unwrap_or_else(|| ("Unknown".into(), "Unknown".into()));
+                let display_info = display_info::for_connector(&device.drm, connector.handle());
+
+                let make = display_info
+                    .as_ref()
+                    .and_then(|info| info.make())
+                    .unwrap_or_else(|| "Unknown".into());
+
+                let model = display_info
+                    .as_ref()
+                    .and_then(|info| info.model())
+                    .unwrap_or_else(|| "Unknown".into());
 
                 let (w, h) = connector.size().unwrap_or((0, 0));
                 let output = Output::new(
                     name.clone(),
                     PhysicalProperties {
                         size: (w as i32, h as i32).into(),
-                        subpixel: smithay::output::Subpixel::Unknown,
+                        subpixel: connector.subpixel().into(),
                         make,
                         model,
                     },
                 );
-                let global = output.create_global::<State>(display);
+                let global = output.create_global::<State>(&self.display_handle);
 
                 let mut output_mode = WlMode::from(drm_mode);
                 if let Some(config) = config_output {
@@ -536,22 +572,23 @@ impl State {
                         Some(output_mode),
                         Some(Transform::Normal),
                         Some(smithay::output::Scale::Fractional(config.scale)),
-                        Some(config.possition.into()),
+                        None,
                     );
                 } else {
                     output.set_preferred(output_mode);
-                    output.change_current_state(
-                        Some(output_mode),
-                        Some(Transform::Normal),
-                        Some(smithay::output::Scale::Integer(1)),
-                        None,
-                    );
+                    output.change_current_state(Some(output_mode), None, None, None);
                 }
+
+                for ws in self.workspaces.workspaces.iter_mut() {
+                    ws.space.map_output(&output, output.current_location());
+                }
+
                 let render_formats = renderer
                     .as_mut()
                     .egl_context()
                     .dmabuf_render_formats()
                     .clone();
+
                 let gbm_allocator = GbmAllocator::new(
                     device.gbm.clone(),
                     GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
@@ -593,7 +630,7 @@ impl State {
                     SUPPORTED_FORMATS.to_vec(),
                     render_formats,
                     device.drm.cursor_size(),
-                    Some(device.gbm.clone()),
+                    None,
                 )
                 .unwrap();
 
@@ -620,9 +657,6 @@ impl State {
                     output: output.clone(),
                     global_id: global,
                 };
-                for ws in self.workspaces.workspaces.iter_mut() {
-                    ws.space.map_output(&output, output.current_location());
-                }
 
                 device.surfaces.insert(crtc, surface);
 
@@ -697,6 +731,14 @@ impl State {
             .rev()
             .partition(|s| matches!(s.layer(), Layer::Background | Layer::Bottom));
 
+        match self.xwm {
+            Some(_) => {
+                tracing::info!("xwm_xwayland_s")
+            }
+            None => {
+                tracing::info!("xwm_xwayland_err")
+            }
+        }
         renderelements.extend(
             upper
                 .into_iter()
@@ -722,7 +764,6 @@ impl State {
 
         let active_window = &ws.active_window;
         let border_thickness = self.config.border.thickness;
-        tracing::info!("workspace: {}", self.workspaces.active_workspace);
         let is_full = is_fullscreen(ws.space.elements());
         if let Some(win) = is_full {
             let location = ws.space.element_location(win).unwrap();
@@ -916,7 +957,7 @@ impl State {
             let timer = Timer::from_duration(reschedule_duration);
             self.loop_handle
                 .insert_source(timer, move |_, _, data| {
-                    data.state.render(node, crtc).ok();
+                    data.render(node, crtc).ok();
                     TimeoutAction::Drop
                 })
                 .expect("failed to schedule frame timer");

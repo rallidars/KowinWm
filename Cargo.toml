@@ -33,5 +33,5 @@ features = [
 
 
 [features]
-default=[]
-xwayland = ["smithay/xwayland"]
+default=["xwayland"]
+xwayland = ["smithay/xwayland", "smithay/x11rb_event_source"]

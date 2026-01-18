@@ -1,4 +1,9 @@
-use std::{cell::RefCell, ffi::OsString, sync::Arc, time::Instant};
+use std::{
+    cell::RefCell,
+    ffi::OsString,
+    sync::{atomic::AtomicBool, Arc},
+    time::Instant,
+};
 
 use smithay::{
     backend::session::Session,
@@ -21,6 +26,7 @@ use smithay::{
     wayland::{
         compositor::{self, CompositorClientState, CompositorState},
         input_method::InputMethodManagerState,
+        output::OutputManagerState,
         seat::WaylandFocus,
         selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
         shell::{
@@ -28,16 +34,22 @@ use smithay::{
             xdg::{decoration::XdgDecorationState, XdgShellState},
         },
         shm::ShmState,
+        single_pixel_buffer::SinglePixelBufferState,
         socket::ListeningSocketSource,
+        viewporter::ViewporterState,
         xdg_activation::XdgActivationState,
     },
+    xwayland::XWaylandEvent,
 };
 
 #[cfg(feature = "xwayland")]
-use smithay::{wayland::xwayland_shell, xwayland::X11Wm};
+use smithay::{
+    wayland::{xwayland_keyboard_grab::XWaylandKeyboardGrabState, xwayland_shell},
+    xwayland::X11Wm,
+};
 
 use crate::{
-    backend::udev::UdevData,
+    udev::UdevData,
     utils::{
         config::Config,
         workspaces::{place_on_center, WindowMode, WindowUserData, Workspaces},
@@ -51,9 +63,16 @@ pub struct CalloopData {
 }
 
 pub struct State {
+    //something idk
+    pub viewporter_state: ViewporterState,
+    pub single_pixel_buffer_state: SinglePixelBufferState,
+
+    //basics
+    pub running: Arc<AtomicBool>,
+
     pub config: Config,
     pub backend_data: UdevData,
-    pub loop_handle: LoopHandle<'static, CalloopData>,
+    pub loop_handle: LoopHandle<'static, State>,
     pub workspaces: Workspaces,
     pub display_handle: DisplayHandle,
     pub start_time: Instant,
@@ -61,6 +80,7 @@ pub struct State {
     pub pointer_location: Point<f64, Logical>,
     pub socket_name: OsString,
 
+    pub output_manager_state: OutputManagerState,
     pub xdg_shell_state: XdgShellState,
     pub xdg_activation_state: XdgActivationState,
     pub xdg_decoration_state: XdgDecorationState,
@@ -87,7 +107,7 @@ pub struct State {
 
 impl State {
     pub fn new(
-        loop_handle: LoopHandle<'static, CalloopData>,
+        loop_handle: LoopHandle<'static, State>,
         loop_signal: LoopSignal,
         display: Display<Self>,
         backend_data: UdevData,
@@ -95,9 +115,16 @@ impl State {
         let start_time = Instant::now();
         let dh = display.handle();
 
+        //someething idk
+        let viewporter_state = ViewporterState::new::<Self>(&dh);
+        let single_pixel_buffer_state = SinglePixelBufferState::new::<Self>(&dh);
+
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
+
+        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
+
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let mut seat_state: SeatState<Self> = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
@@ -106,7 +133,6 @@ impl State {
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
-        //InputMethodManagerState::new::<Self, _>(&dh, |_client| true);
         let config = Config::get_config().unwrap_or_default();
         let current_layout = config
             .keyboard
@@ -131,6 +157,9 @@ impl State {
         #[cfg(feature = "xwayland")]
         let xwayland_shell_state = xwayland_shell::XWaylandShellState::new::<Self>(&dh.clone());
 
+        #[cfg(feature = "xwayland")]
+        XWaylandKeyboardGrabState::new::<Self>(&dh.clone());
+
         loop_handle
             .insert_source(listening_socket, move |client_stream, _, state| {
                 // Inside the callback, you should insert the client into the display.
@@ -148,18 +177,19 @@ impl State {
             .insert_source(
                 Generic::new(display, Interest::READ, Mode::Level),
                 |_, display, state| {
-                    unsafe {
-                        display
-                            .get_mut()
-                            .dispatch_clients(&mut state.state)
-                            .unwrap()
-                    };
+                    unsafe { display.get_mut().dispatch_clients(state).unwrap() };
                     Ok(PostAction::Continue)
                 },
             )
             .expect("Failed to init wayland server source");
 
         Self {
+            viewporter_state,
+            single_pixel_buffer_state,
+
+            running: Arc::new(AtomicBool::new(true)),
+
+            output_manager_state,
             pointer_location: (0.0, 0.0).into(),
             pointer,
             backend_data,
@@ -307,7 +337,18 @@ impl State {
                 .find(|w| w.wl_surface().map(|s| *s == under).unwrap_or(false));
 
             if let Some(a) = active {
-                ws.space.raise_element(a, false);
+                match a
+                    .user_data()
+                    .get::<RefCell<WindowUserData>>()
+                    .unwrap()
+                    .borrow()
+                    .mode
+                {
+                    WindowMode::Floating => {
+                        ws.space.raise_element(a, false);
+                    }
+                    _ => {}
+                }
             }
             ws.active_window = active.cloned();
             self.set_keyboard_focus(Some(under));
@@ -387,7 +428,6 @@ impl State {
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| {
                     state.bounds = output_geometry.map(|s| s.size);
-                    state.states.set(xdg_toplevel::State::Maximized);
                     state.size = Some((geo.size.w - offset * 2, geo.size.h - offset * 2).into());
                 });
                 toplevel.send_configure();
@@ -451,6 +491,14 @@ impl State {
         }
 
         None
+    }
+    pub fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
+        self.workspaces
+            .get_current()
+            .space
+            .elements()
+            .find(|window| window.wl_surface().map(|s| &*s == surface).unwrap_or(false))
+            .cloned()
     }
 }
 

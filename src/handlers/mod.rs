@@ -6,26 +6,36 @@ mod xwayland;
 use std::{os::fd::OwnedFd, sync::Mutex};
 
 use crate::state::{ClientState, State};
+#[cfg(feature = "xwayland")]
+use smithay::xwayland::XWaylandClientData;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
-    delegate_primary_selection, delegate_seat, delegate_shm,
+    delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_layer_shell,
+    delegate_output, delegate_presentation, delegate_primary_selection, delegate_seat,
+    delegate_shm, delegate_single_pixel_buffer, delegate_viewporter,
     desktop::{
         layer_map_for_output, LayerSurface, PopupKind, PopupManager, Space, Window,
         WindowSurfaceType,
     },
     input::{Seat, SeatHandler, SeatState},
     output::Output,
-    reexports::wayland_server::{
-        protocol::{wl_buffer, wl_surface::WlSurface},
-        Client, Resource,
+    reexports::{
+        calloop::Interest,
+        wayland_server::{
+            protocol::{wl_buffer, wl_surface::WlSurface},
+            Client, Resource,
+        },
     },
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler,
-            CompositorState,
+            add_blocker, add_pre_commit_hook, get_parent, is_sync_subsurface, with_states,
+            BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
+            SurfaceAttributes,
         },
+        dmabuf::get_dmabuf,
+        drm_syncobj::DrmSyncobjCachedState,
+        fractional_scale::FractionalScaleHandler,
         output::OutputHandler,
         seat::WaylandFocus,
         selection::{
@@ -40,7 +50,7 @@ use smithay::{
         },
         shell::{
             wlr_layer::{LayerSurfaceData, WlrLayerShellHandler},
-            xdg::{XdgPopupSurfaceData, XdgToplevelSurfaceRoleAttributes},
+            xdg::{XdgPopupSurfaceData, XdgToplevelSurfaceData, XdgToplevelSurfaceRoleAttributes},
         },
         shm::{ShmHandler, ShmState},
     },
@@ -69,7 +79,7 @@ pub fn handle_commit(space: &Space<Window>, surface: &WlSurface, popup_manager: 
         let initial_configure_sent = with_states(surface, |states| {
             states
                 .data_map
-                .get::<Mutex<XdgToplevelSurfaceRoleAttributes>>()
+                .get::<XdgToplevelSurfaceData>()
                 .unwrap()
                 .lock()
                 .unwrap()
@@ -119,16 +129,7 @@ pub fn handle_commit(space: &Space<Window>, surface: &WlSurface, popup_manager: 
             }
         };
 
-        let initial_configure_sent = with_states(surface, |states| {
-            states
-                .data_map
-                .get::<XdgPopupSurfaceData>()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .initial_configure_sent
-        });
-        if !initial_configure_sent {
+        if !popup.is_initial_configure_sent() {
             // NOTE: This should never fail as the initial configure is always
             // allowed.
             popup.send_configure().expect("initial configure failed");
@@ -155,30 +156,115 @@ impl CompositorHandler for State {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
     }
-
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        #[cfg(feature = "xwayland")]
+        if let Some(state) = client.get_data::<XWaylandClientData>() {
+            return &state.compositor_state;
+        }
+        if let Some(state) = client.get_data::<ClientState>() {
+            return &state.compositor_state;
+        }
+        panic!("Unknown client data type")
+    }
+
+    fn new_surface(&mut self, surface: &WlSurface) {
+        add_pre_commit_hook::<Self, _>(surface, move |state, _dh, surface| {
+            let mut acquire_point = None;
+            let maybe_dmabuf = with_states(surface, |surface_data| {
+                acquire_point.clone_from(
+                    &surface_data
+                        .cached_state
+                        .get::<DrmSyncobjCachedState>()
+                        .pending()
+                        .acquire_point,
+                );
+                surface_data
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .pending()
+                    .buffer
+                    .as_ref()
+                    .and_then(|assignment| match assignment {
+                        BufferAssignment::NewBuffer(buffer) => get_dmabuf(buffer).cloned().ok(),
+                        _ => None,
+                    })
+            });
+            if let Some(dmabuf) = maybe_dmabuf {
+                if let Some(acquire_point) = acquire_point {
+                    if let Ok((blocker, source)) = acquire_point.generate_blocker() {
+                        let client = surface.client().unwrap();
+                        let res = state.loop_handle.insert_source(source, move |_, _, data| {
+                            let dh = data.display_handle.clone();
+                            data.client_compositor_state(&client)
+                                .blocker_cleared(data, &dh);
+                            Ok(())
+                        });
+                        if res.is_ok() {
+                            add_blocker(surface, blocker);
+                            return;
+                        }
+                    }
+                }
+                if let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) {
+                    if let Some(client) = surface.client() {
+                        let res = state.loop_handle.insert_source(source, move |_, _, data| {
+                            let dh = data.display_handle.clone();
+                            data.client_compositor_state(&client)
+                                .blocker_cleared(data, &dh);
+                            Ok(())
+                        });
+                        if res.is_ok() {
+                            add_blocker(surface, blocker);
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
-        let ws = self.workspaces.get_current();
+        self.backend_data.early_import(surface);
+
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
-            if let Some(window) = ws
-                .space
-                .elements()
-                .find(|w| w.toplevel().unwrap().wl_surface() == &root)
-            {
+            let ws = self.workspaces.get_current_mut();
+            let window = {
+                ws.space
+                    .elements()
+                    .find(|w| w.toplevel().unwrap().wl_surface() == &root)
+                    .cloned()
+            };
+            if let Some(window) = window {
                 window.on_commit();
+
+                if &root == surface {
+                    let buffer_offset = with_states(surface, |states| {
+                        states
+                            .cached_state
+                            .get::<SurfaceAttributes>()
+                            .current()
+                            .buffer_delta
+                            .take()
+                    });
+
+                    if let Some(buffer_offset) = buffer_offset {
+                        let current_loc = ws.space.element_location(&window).unwrap();
+                        ws.space
+                            .map_element(window.clone(), current_loc + buffer_offset, false);
+                    }
+                }
             }
         };
         self.popup_manager.commit(surface);
-        handle_commit(&ws.space, surface, &self.popup_manager);
-        //self.set_keyboard_focus_auto();
+        handle_commit(
+            &self.workspaces.get_current().space,
+            surface,
+            &self.popup_manager,
+        );
     }
 }
 
@@ -278,7 +364,14 @@ impl WlrLayerShellHandler for State {
     ) {
         tracing::info!("layer_new_popup")
     }
+    fn ack_configure(
+        &mut self,
+        surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        configure: smithay::wayland::shell::wlr_layer::LayerSurfaceConfigure,
+    ) {
+    }
 }
+
 delegate_layer_shell!(State);
 
 impl PrimarySelectionHandler for State {
@@ -289,54 +382,5 @@ impl PrimarySelectionHandler for State {
 
 delegate_primary_selection!(State);
 
-//impl InputMethodHandler for State {
-//    fn new_popup(&mut self, surface: PopupSurface) {
-//        tracing::info!("new_popup");
-//        let Ok(root) = find_popup_root_surface(&PopupKind::from(surface.clone())) else {
-//            return;
-//        };
-//
-//        let Some(window) = self
-//            .workspaces
-//            .get_current()
-//            .layout
-//            .iter()
-//            .find(|w| w.wl_surface().unwrap().as_ref() == &root)
-//            .clone()
-//        else {
-//            return;
-//        };
-//
-//        let window_geo = window.geometry();
-//
-//        tracing::info!("geometry_new_popup: {:?}", window_geo);
-//
-//        let geometry = positioner.get_unconstrained_geometry(window_geo);
-//
-//        surface.with_pending_state(|state| {
-//            state.geometry = geometry;
-//        });
-//        if let Err(err) = self.popup_manager.track_popup(PopupKind::from(surface)) {
-//            tracing::warn!("Failed to track popup: {}", err);
-//        }
-//    }
-//
-//    fn popup_repositioned(&mut self, _: PopupSurface) {}
-//
-//    fn dismiss_popup(&mut self, surface: PopupSurface) {
-//        if let Some(parent) = surface.get_parent().map(|parent| parent.surface.clone()) {
-//            let _ = PopupManager::dismiss_popup(&parent, &PopupKind::from(surface));
-//        }
-//    }
-//
-//    fn parent_geometry(&self, parent: &WlSurface) -> Rectangle<i32, smithay::utils::Logical> {
-//        self.space
-//            .elements()
-//            .find_map(|window| {
-//                (window.wl_surface().as_deref() == Some(parent)).then(|| window.geometry())
-//            })
-//            .unwrap_or_default()
-//    }
-//}
-//
-//delegate_input_method_manager!(State);
+delegate_viewporter!(State);
+delegate_single_pixel_buffer!(State);

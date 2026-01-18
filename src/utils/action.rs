@@ -45,6 +45,15 @@ pub enum Direction {
 
 impl Action {
     pub fn execute(&self, state: &mut State) {
+        let pointer = state.seat.get_pointer().unwrap();
+        let serial = SERIAL_COUNTER.next_serial();
+        if pointer.is_grabbed() {
+            pointer.unset_grab(state, serial, 0);
+            match self {
+                Action::MoveWindowMouse => return,
+                _ => {}
+            }
+        }
         match self {
             Action::VTSwitch(vt) => {
                 if let Err(err) = state.backend_data.session.change_vt(*vt) {
@@ -163,62 +172,57 @@ impl Action {
                 }
             }
             Action::MoveWindowMouse => {
-                let pointer = state.seat.get_pointer().unwrap();
-                let serial = SERIAL_COUNTER.next_serial();
-                if pointer.is_grabbed() {
-                    pointer.unset_grab(state, serial, 0);
-                } else {
-                    let surface = match state.surface_under() {
-                        Some(surface) => surface,
-                        None => return,
-                    };
-                    let ws = state.workspaces.get_current_mut();
-                    let window = ws
-                        .space
-                        .elements()
-                        .find(|element| {
-                            element
-                                .wl_surface()
-                                .map(|s| &*s == &surface.0)
-                                .unwrap_or(false)
-                        })
-                        .unwrap()
-                        .clone();
-                    tracing::info!("start reposition");
-                    let start_data = GrabStartData {
-                        focus: Some(surface),
-                        button: 272,
-                        location: state.pointer_location,
-                    };
-                    let window_geo = match ws.space.element_geometry(&window) {
-                        Some(l) => l,
-                        None => return,
-                    };
+                let surface = match state.surface_under() {
+                    Some(surface) => surface,
+                    None => return,
+                };
+                let ws = state.workspaces.get_current_mut();
+                let window = ws
+                    .space
+                    .elements()
+                    .find(|element| {
+                        element
+                            .wl_surface()
+                            .map(|s| &*s == &surface.0)
+                            .unwrap_or(false)
+                    })
+                    .unwrap()
+                    .clone();
+                tracing::info!("start reposition");
+                let start_data = GrabStartData {
+                    focus: Some(surface),
+                    button: 272,
+                    location: state.pointer_location,
+                };
+                let window_geo = match ws.space.element_geometry(&window) {
+                    Some(l) => l,
+                    None => return,
+                };
 
-                    let pointer_pos = start_data.location;
+                let pointer_pos = start_data.location;
 
-                    let start_loc: Point<i32, Logical> = (
-                        pointer_pos.x as i32 - (window_geo.size.w as i32 / 2),
-                        pointer_pos.y as i32 - (window_geo.size.h as i32 / 2),
-                    )
-                        .into();
+                let start_loc: Point<i32, Logical> = (
+                    pointer_pos.x as i32 - (window_geo.size.w as i32 / 2),
+                    pointer_pos.y as i32 - (window_geo.size.h as i32 / 2),
+                )
+                    .into();
 
-                    window
-                        .user_data()
-                        .get::<RefCell<WindowUserData>>()
-                        .unwrap()
-                        .borrow_mut()
-                        .mode = WindowMode::Floating;
+                window
+                    .user_data()
+                    .get::<RefCell<WindowUserData>>()
+                    .unwrap()
+                    .borrow_mut()
+                    .mode = WindowMode::Floating;
 
-                    ws.space.map_element(window.clone(), start_loc, false);
-                    let grab = MovePointerGrab {
-                        start_data,
-                        window,
-                        start_loc,
-                    };
+                ws.space.map_element(window.clone(), start_loc, false);
+                let grab = MovePointerGrab {
+                    start_data,
+                    window,
+                    start_loc,
+                };
 
-                    pointer.set_grab(state, grab, serial, Focus::Clear);
-                }
+                pointer.set_grab(state, grab, serial, Focus::Clear);
+                state.refresh_layout();
             }
             Action::ResizeWindowMouse => {}
         };
