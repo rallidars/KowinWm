@@ -30,8 +30,8 @@ impl Default for Config {
         let border = Border {
             thickness: 2,
             gap: 2,
-            active: 0x8B4000,
-            inactive: 0x2A2A2A,
+            active: "#8B4000".to_string(),
+            inactive: "#2A2A2A".to_string(),
         };
         let keyboard = KeyboardConfig {
             layouts: vec!["us".to_string()],
@@ -160,8 +160,8 @@ impl Config {
 pub struct Border {
     pub thickness: i32,
     pub gap: i32,
-    pub active: u32,
-    pub inactive: u32,
+    pub active: String,
+    pub inactive: String,
 }
 
 #[derive(Deserialize, Serialize)]

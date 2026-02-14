@@ -704,17 +704,28 @@ impl State {
     pub fn render(&mut self, node: DrmNode, crtc: crtc::Handle) -> Result<bool, SwapBuffersError> {
         let device = self.backend_data.devices.get_mut(&node).unwrap();
         let surface = device.surfaces.get_mut(&crtc).unwrap();
+
         let mut renderer = self
             .backend_data
             .gpus
             .single_renderer(&device.render_node)
             .unwrap();
+
         let ws = self.workspaces.get_current();
         let output = ws.space.outputs().next().unwrap();
 
-        let mut renderelements: Vec<CustomRenderElements<_>> = vec![];
         let scale = Scale::from(1.0);
-        renderelements.append(&mut vec![CustomRenderElements::from(
+        let physical_scale = 1;
+
+        // ------------------------------------------------------------
+        // Render element collection (NO allocations inside loops)
+        // ------------------------------------------------------------
+        let mut elements: Vec<CustomRenderElements<_>> = Vec::with_capacity(128);
+
+        // ------------------------------------------------------------
+        // Cursor
+        // ------------------------------------------------------------
+        elements.push(CustomRenderElements::from(
             TextureRenderElement::from_texture_buffer(
                 self.pointer_location.to_physical(scale),
                 &surface.pointer_texture,
@@ -723,166 +734,116 @@ impl State {
                 None,
                 Kind::Cursor,
             ),
-        )]);
+        ));
 
+        // ------------------------------------------------------------
+        // Layer surfaces (TOP → BOTTOM, no Vec partition)
+        // ------------------------------------------------------------
         let layer_map = layer_map_for_output(output);
-        let (lower, upper): (Vec<&LayerSurface>, Vec<&LayerSurface>) = layer_map
-            .layers()
-            .rev()
-            .partition(|s| matches!(s.layer(), Layer::Background | Layer::Bottom));
 
-        match self.xwm {
-            Some(_) => {
-                tracing::info!("xwm_xwayland_s")
+        for layer_surface in layer_map.layers().rev() {
+            if matches!(layer_surface.layer(), Layer::Background | Layer::Bottom) {
+                continue;
             }
-            None => {
-                tracing::info!("xwm_xwayland_err")
+
+            if let Some(geo) = layer_map.layer_geometry(layer_surface) {
+                for elem in AsRenderElements::<MultiRenderer<_, _>>::render_elements::<
+                    WaylandSurfaceRenderElement<_>,
+                >(
+                    layer_surface,
+                    &mut renderer,
+                    geo.loc.to_physical_precise_round(physical_scale),
+                    scale,
+                    1.0,
+                ) {
+                    elements.push(CustomRenderElements::Window(elem));
+                }
             }
         }
-        renderelements.extend(
-            upper
-                .into_iter()
-                .filter_map(|surface| {
-                    layer_map
-                        .layer_geometry(surface)
-                        .map(|geo| (geo.loc, surface))
-                })
-                .flat_map(|(loc, surface)| {
-                    AsRenderElements::<MultiRenderer<_, _>>::render_elements::<
-                        WaylandSurfaceRenderElement<MultiRenderer<_, _>>,
-                    >(
-                        surface,
-                        &mut renderer,
-                        loc.to_physical_precise_round(1),
-                        Scale::from(1.0),
-                        1.0,
-                    )
-                    .into_iter()
-                    .map(CustomRenderElements::Window)
-                }),
-        );
 
-        let active_window = &ws.active_window;
-        let border_thickness = self.config.border.thickness;
-        let is_full = is_fullscreen(ws.space.elements());
-        if let Some(win) = is_full {
-            let location = ws.space.element_location(win).unwrap();
-            renderelements.extend(
-                win.render_elements(&mut renderer, location.to_physical(1), scale, 1.0)
-                    .into_iter()
-                    .map(CustomRenderElements::Window),
-            );
+        // ------------------------------------------------------------
+        // Windows
+        // ------------------------------------------------------------
+        let border = &self.config.border;
+        let active = ws.active_window.as_ref();
+        let fullscreen = is_fullscreen(ws.space.elements());
+
+        if let Some(win) = fullscreen {
+            let loc = ws.space.element_location(win).unwrap();
+            for elem in
+                win.render_elements(&mut renderer, loc.to_physical(physical_scale), scale, 1.0)
+            {
+                elements.push(CustomRenderElements::Window(elem));
+            }
         } else {
             for window in ws.space.elements().rev() {
-                let user_data = window
-                    .user_data()
-                    .get::<RefCell<WindowUserData>>()
-                    .unwrap()
-                    .borrow();
-                match user_data.mode {
-                    WindowMode::Floating => {
-                        let mut geo = ws.space.element_geometry(&window).unwrap();
-                        geo.size += (border_thickness * 2, border_thickness * 2).into();
-                        // Shift the location of the top left by the border thickness.
-                        geo.loc -= (border_thickness, border_thickness).into();
-                        let color = if Some(window) == active_window.as_ref() {
-                            self.config.border.active
-                        } else {
-                            self.config.border.inactive
-                        };
+                // Geometry cached once
+                let geo = ws.space.element_geometry(&window).unwrap();
+                let loc = ws.space.element_location(&window).unwrap();
+                let win_geo = window.geometry();
 
-                        let border = BorderShader::element(
-                            renderer.as_mut(),
-                            geo,
-                            1.0,
-                            color,
-                            border_thickness as f32,
-                        );
+                // Border
+                let mut border_geo = geo;
+                border_geo.size += (border.thickness * 2, border.thickness * 2).into();
+                border_geo.loc -= (border.thickness, border.thickness).into();
 
-                        renderelements.push(CustomRenderElements::Shader(border));
-                        let location =
-                            ws.space.element_location(&window).unwrap() - window.geometry().loc;
+                let color = if Some(window) == active {
+                    border.active.clone()
+                } else {
+                    border.inactive.clone()
+                };
 
-                        renderelements.extend(
-                            window
-                                .render_elements(&mut renderer, location.to_physical(1), scale, 1.0)
-                                .into_iter()
-                                .map(CustomRenderElements::Window),
-                        );
-                    }
-                    _ => continue,
-                }
-            }
-            for window in ws.space.elements().rev() {
-                let user_data = window
-                    .user_data()
-                    .get::<RefCell<WindowUserData>>()
-                    .unwrap()
-                    .borrow();
-                match user_data.mode {
-                    WindowMode::Tiled => {
-                        let mut geo = ws.space.element_geometry(&window).unwrap();
-                        geo.size += (border_thickness * 2, border_thickness * 2).into();
-                        // Shift the location of the top left by the border thickness.
-                        geo.loc -= (border_thickness, border_thickness).into();
-                        let color = if Some(window) == active_window.as_ref() {
-                            self.config.border.active
-                        } else {
-                            self.config.border.inactive
-                        };
+                let border_elem = BorderShader::element(
+                    renderer.as_mut(),
+                    border_geo,
+                    1.0,
+                    &color,
+                    border.thickness as f32,
+                );
 
-                        let border = BorderShader::element(
-                            renderer.as_mut(),
-                            geo,
-                            1.0,
-                            color,
-                            border_thickness as f32,
-                        );
+                elements.push(CustomRenderElements::Shader(border_elem));
 
-                        renderelements.push(CustomRenderElements::Shader(border));
-                        let location =
-                            ws.space.element_location(&window).unwrap() - window.geometry().loc;
-
-                        renderelements.extend(
-                            window
-                                .render_elements(&mut renderer, location.to_physical(1), scale, 1.0)
-                                .into_iter()
-                                .map(CustomRenderElements::Window),
-                        );
-                    }
-                    _ => continue,
+                // Window content
+                let offset = loc - win_geo.loc;
+                for elem in window.render_elements(
+                    &mut renderer,
+                    offset.to_physical(physical_scale),
+                    scale,
+                    1.0,
+                ) {
+                    elements.push(CustomRenderElements::Window(elem));
                 }
             }
         }
 
-        renderelements.extend(
-            lower
-                .into_iter()
-                .filter_map(|surface| {
-                    layer_map
-                        .layer_geometry(surface)
-                        .map(|geo| (geo.loc, surface))
-                })
-                .flat_map(|(loc, surface)| {
-                    AsRenderElements::<MultiRenderer<_, _>>::render_elements::<
-                        WaylandSurfaceRenderElement<MultiRenderer<_, _>>,
-                    >(
-                        surface,
-                        &mut renderer,
-                        loc.to_physical_precise_round(1),
-                        Scale::from(1.0),
-                        1.0,
-                    )
-                    .into_iter()
-                    .map(CustomRenderElements::Window)
-                }),
-        );
+        // ------------------------------------------------------------
+        // Bottom layers
+        // ------------------------------------------------------------
+        for layer_surface in layer_map.layers().rev() {
+            if !matches!(layer_surface.layer(), Layer::Background | Layer::Bottom) {
+                continue;
+            }
+
+            if let Some(geo) = layer_map.layer_geometry(layer_surface) {
+                for elem in AsRenderElements::<MultiRenderer<_, _>>::render_elements::<
+                    WaylandSurfaceRenderElement<_>,
+                >(
+                    layer_surface,
+                    &mut renderer,
+                    geo.loc.to_physical_precise_round(physical_scale),
+                    scale,
+                    1.0,
+                ) {
+                    elements.push(CustomRenderElements::Window(elem));
+                }
+            }
+        }
 
         let frame_result: Result<RenderFrameResult<_, _, _>, SwapBuffersError> = surface
             .compositor
             .render_frame::<_, _>(
                 &mut renderer,
-                &renderelements,
+                &elements,
                 [0.1, 0.1, 0.1, 1.0],
                 FrameFlags::DEFAULT,
             )

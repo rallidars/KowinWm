@@ -20,7 +20,7 @@ impl BorderShader {
         renderer: &mut GlowRenderer,
         geo: Rectangle<i32, Logical>,
         alpha: f32,
-        border_color: u32,
+        border_color: &str,
         border_thickness: f32,
     ) -> PixelShaderElement {
         let program = renderer
@@ -31,21 +31,19 @@ impl BorderShader {
             .0
             .clone();
 
-        let point = geo.size.to_point();
-
-        let red = border_color >> 16 & 255;
-        let green = border_color >> 8 & 255;
-        let blue = border_color & 255;
-
+        let angle = 0.0 * std::f32::consts::PI;
+        let gradient_direction = [angle.cos(), angle.sin()];
         PixelShaderElement::new(
             program,
             geo,
             None,
-            alpha,
+            1.0,
             vec![
-                Uniform::new("u_resolution", (point.x as f32, point.y as f32)),
-                Uniform::new("border_color", (red as f32, green as f32, blue as f32)),
-                Uniform::new("border_thickness", border_thickness),
+                Uniform::new("startColor", hex_to_rgb(border_color).unwrap()),
+                Uniform::new("endColor", hex_to_rgb(border_color).unwrap()),
+                Uniform::new("thickness", border_thickness),
+                Uniform::new("halfThickness", border_thickness * 0.5),
+                Uniform::new("gradientDirection", gradient_direction),
             ],
             Kind::Unspecified,
         )
@@ -59,9 +57,11 @@ pub fn compile_shaders(renderer: &mut GlowRenderer) {
         .compile_custom_pixel_shader(
             BORDER_SHADER,
             &[
-                UniformName::new("u_resolution", UniformType::_2f),
-                UniformName::new("border_color", UniformType::_3f),
-                UniformName::new("border_thickness", UniformType::_1f),
+                UniformName::new("startColor", UniformType::_3f),
+                UniformName::new("endColor", UniformType::_3f),
+                UniformName::new("thickness", UniformType::_1f),
+                UniformName::new("halfThickness", UniformType::_1f),
+                UniformName::new("gradientDirection", UniformType::_2f),
             ],
         )
         .unwrap();
@@ -71,4 +71,20 @@ pub fn compile_shaders(renderer: &mut GlowRenderer) {
         .egl_context()
         .user_data()
         .insert_if_missing(|| BorderShader(border_shader));
+}
+
+fn hex_to_rgb(hex: &str) -> Result<[f32; 3], &'static str> {
+    let hex = hex.trim_start_matches('#');
+
+    if hex.len() != 6 {
+        return Err("Hex color must be 6 characters");
+    }
+
+    let value = u32::from_str_radix(hex, 16).map_err(|_| "Invalid hex string")?;
+
+    let r = ((value >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((value >> 8) & 0xFF) as f32 / 255.0;
+    let b = (value & 0xFF) as f32 / 255.0;
+
+    Ok([r, g, b])
 }

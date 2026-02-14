@@ -1,21 +1,24 @@
+use std::cell::RefCell;
+
 use smithay::{
     backend::renderer::{
         element::{AsRenderElements, Kind},
         ImportAll, Renderer,
     },
-    desktop::{layer_map_for_output, space::SpaceElement, Space, Window},
+    desktop::{layer_map_for_output, space::SpaceElement, Space, Window, WindowSurface},
     output::Output,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
     utils::{Logical, Point, Rectangle, Size},
     wayland::{seat::WaylandFocus, shell::xdg::ToplevelSurface},
 };
 
-use crate::utils::action::Direction;
+use crate::utils::{action::Direction, layout::LayoutState};
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone)]
 pub enum WindowMode {
     Tiled,
     Floating,
+    Fullscreen(Rectangle<i32, Logical>),
 }
 
 pub struct WindowUserData {
@@ -25,7 +28,7 @@ pub struct WindowUserData {
 pub struct Workspace {
     pub full_geo: Option<Rectangle<i32, Logical>>,
     pub space: Space<Window>,
-    pub layout: Vec<Window>,
+    pub layout: LayoutState,
     pub active_window: Option<Window>,
     pub prev_window: Option<Window>,
 }
@@ -35,7 +38,7 @@ impl Workspace {
         Self {
             full_geo: None,
             space: Space::default(),
-            layout: vec![],
+            layout: LayoutState::default(),
             active_window: None,
             prev_window: None,
         }
@@ -78,7 +81,7 @@ impl Workspaces {
     }
 
     pub fn is_ws_empty(&self, workspace: usize) -> bool {
-        return self.workspaces[workspace].layout.is_empty();
+        return self.workspaces[workspace].space.elements().len() == 0;
     }
 
     pub fn set_active_workspace(&mut self, workspace: usize) {
@@ -100,18 +103,7 @@ impl Workspaces {
 
         let ws = self.get_current_mut();
         let loc = ws.space.element_location(&active);
-        let mut removed = None;
-        ws.layout.retain(|w| {
-            if w == &active {
-                removed = Some(w.clone());
-                false
-            } else {
-                true
-            }
-        });
-        if let Some(r) = removed {
-            ws.space.unmap_elem(&r);
-        }
+        ws.space.unmap_elem(&active);
         self.set_active_workspace(ws_index);
         self.insert_window(active.clone());
         if let Some(loc) = loc {
@@ -121,26 +113,16 @@ impl Workspaces {
         }
     }
 
-    pub fn remove_window(&mut self, surface: &Window) {
+    pub fn remove_window(&mut self, window: &Window) {
         let ws = self.get_current_mut();
-        let mut removed = None;
-        ws.layout.retain(|w| {
-            if w == surface {
-                removed = Some(w.clone());
-                false
-            } else {
-                true
-            }
-        });
-        if let Some(r) = removed {
-            ws.space.unmap_elem(&r);
-        }
+        ws.space.unmap_elem(window);
+        ws.active_window = None;
     }
 
     pub fn insert_window(&mut self, window: Window) {
         let ws = self.get_current_mut();
         ws.active_window = Some(window.clone());
-        ws.layout.push(window);
+        ws.space.map_element(window, (0, 0), true);
     }
 
     pub fn change_focus(&mut self, direction: &Direction, loc: &mut Point<f64, Logical>) {
@@ -167,16 +149,18 @@ impl Workspaces {
             return;
         }
 
-        let focused_pos = match ws.layout.iter().position(|w| w == &focused) {
+        let focused_pos = match ws.space.element_location(&focused) {
             Some(pos) => pos,
             None => return,
         };
-        let best_pos = match ws.layout.iter().position(|w| w == &best) {
+        let best_pos = match ws.space.element_location(&best) {
             Some(w) => w,
             None => return,
         };
         *loc = window_center(&ws.space, &best).unwrap();
-        self.get_current_mut().layout.swap(focused_pos, best_pos);
+        let ws = self.get_current_mut();
+        ws.space.map_element(focused, best_pos, false);
+        ws.space.map_element(best, focused_pos, false);
     }
 
     fn render_elements(&self) {}
@@ -187,14 +171,14 @@ where
     I: Iterator<Item = &'a Window>,
 {
     for element in elements {
-        if element
-            .toplevel()
-            .unwrap()
-            .current_state()
-            .states
-            .contains(xdg_toplevel::State::Fullscreen)
+        match element
+            .user_data()
+            .get::<RefCell<WindowUserData>>()?
+            .borrow_mut()
+            .mode
         {
-            return Some(element);
+            WindowMode::Fullscreen(_) => return Some(element),
+            _ => {}
         }
     }
     None

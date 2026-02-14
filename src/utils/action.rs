@@ -3,11 +3,14 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use smithay::backend::session::Session;
+use smithay::desktop::WindowSurface;
 use smithay::input::keyboard::XkbConfig;
 use smithay::input::pointer::{Focus, GrabStartData};
 use smithay::utils::{Logical, Point};
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::XdgShellHandler;
+#[cfg(feature = "xwayland")]
+use smithay::xwayland::XwmHandler;
 
 use crate::state::State;
 use crate::utils::config::Config;
@@ -81,8 +84,14 @@ impl Action {
                     Some(w) => w,
                     None => return,
                 };
-                if let Some(toplevel) = active.toplevel() {
-                    toplevel.send_close();
+                match active.underlying_surface() {
+                    WindowSurface::Wayland(xdg) => {
+                        xdg.send_close();
+                    }
+                    #[cfg(feature = "xwayland")]
+                    WindowSurface::X11(x11) => {
+                        x11.close();
+                    }
                 }
             }
             Action::FloatingWindow => {
@@ -105,6 +114,7 @@ impl Action {
                     WindowMode::Floating => {
                         user_data.mode = WindowMode::Tiled;
                     }
+                    WindowMode::Fullscreen(_) => {}
                 }
                 drop(user_data);
                 state.refresh_layout();
@@ -157,18 +167,36 @@ impl Action {
                 state.set_keyboard_focus_auto();
             }
             Action::Fullscreen => {
-                let acitve_window = match &state.workspaces.get_current().active_window {
+                let active_window = match &state.workspaces.get_current().active_window {
                     Some(active) => active,
                     None => return,
                 };
-                let elements = state.workspaces.get_current().layout.iter();
+                let elements = state.workspaces.get_current().space.elements();
                 if let Some(fullscreen) = is_fullscreen(elements) {
                     //if fullscreen == acitve_window {
                     //    state.unfullscreen_request(acitve_window.toplevel().unwrap().clone());
                     //}
-                    state.unfullscreen_request(fullscreen.toplevel().unwrap().clone());
+                    match fullscreen.underlying_surface() {
+                        WindowSurface::Wayland(xdg) => {
+                            XdgShellHandler::unfullscreen_request(state, xdg.clone());
+                        }
+                        #[cfg(feature = "xwayland")]
+                        WindowSurface::X11(x11) => {
+                            let xwm_id = state.xwm.as_ref().unwrap().id();
+                            XwmHandler::unfullscreen_request(state, xwm_id, x11.clone());
+                        }
+                    }
                 } else {
-                    state.fullscreen_request(acitve_window.toplevel().unwrap().clone(), None);
+                    match active_window.underlying_surface() {
+                        WindowSurface::Wayland(xdg) => {
+                            XdgShellHandler::fullscreen_request(state, xdg.clone(), None);
+                        }
+                        #[cfg(feature = "xwayland")]
+                        WindowSurface::X11(x11) => {
+                            let xwm_id = state.xwm.as_ref().unwrap().id();
+                            XwmHandler::fullscreen_request(state, xwm_id, x11.clone());
+                        }
+                    }
                 }
             }
             Action::MoveWindowMouse => {

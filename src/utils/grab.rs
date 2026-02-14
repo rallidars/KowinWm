@@ -1,5 +1,5 @@
 use smithay::{
-    desktop::Window,
+    desktop::{Window, WindowSurface},
     input::pointer::{
         AxisFrame, ButtonEvent, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
         GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
@@ -240,12 +240,20 @@ impl PointerGrab<State> for ResizePointerGrub {
         }
 
         // Send configure to client
-        self.window.toplevel().unwrap().with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Resizing);
-            state.size = Some(new_size);
-        });
+        match self.window.underlying_surface() {
+            WindowSurface::Wayland(xdg) => {
+                xdg.with_pending_state(|state| {
+                    state.states.set(xdg_toplevel::State::Resizing);
+                    state.size = Some(new_size);
+                });
 
-        self.window.toplevel().unwrap().send_configure();
+                self.window.toplevel().unwrap().send_configure();
+            }
+            #[cfg(feature = "xwayland")]
+            WindowSurface::X11(x11) => {
+                x11.configure(Rectangle::new(new_loc, new_size)).unwrap();
+            }
+        }
 
         self.last_window_size = new_size;
     }

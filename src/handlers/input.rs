@@ -80,23 +80,23 @@ impl State {
 
                 let serial = SERIAL_COUNTER.next_serial();
 
-                let ptr = self.seat.get_pointer().unwrap();
+                if let Some(ptr) = self.seat.get_pointer() {
+                    self.pointer_location = self.clamp_coords(pos);
 
-                self.pointer_location = self.clamp_coords(pos);
+                    let under = self.surface_under();
+                    self.set_keyboard_focus_auto();
 
-                let under = self.surface_under();
-                self.set_keyboard_focus_auto();
-
-                ptr.motion(
-                    self,
-                    under, // (Option<(WlSurface, Point<f64, Logical>)>)
-                    &MotionEvent {
-                        location: pos,
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
-                ptr.frame(self);
+                    ptr.motion(
+                        self,
+                        under, // (Option<(WlSurface, Point<f64, Logical>)>)
+                        &MotionEvent {
+                            location: pos,
+                            serial,
+                            time: event.time_msec(),
+                        },
+                    );
+                    ptr.frame(self);
+                }
             }
             InputEvent::PointerMotion { event } => {
                 let serial = SERIAL_COUNTER.next_serial();
@@ -105,28 +105,29 @@ impl State {
                 self.pointer_location = self.clamp_coords(self.pointer_location);
                 let under = self.surface_under();
 
-                let ptr = self.seat.get_pointer().unwrap();
-                self.set_keyboard_focus_auto();
+                if let Some(ptr) = self.seat.get_pointer() {
+                    self.set_keyboard_focus_auto();
 
-                ptr.motion(
-                    self,
-                    under.clone(),
-                    &MotionEvent {
-                        location: self.pointer_location,
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
-                ptr.relative_motion(
-                    self,
-                    under,
-                    &RelativeMotionEvent {
-                        delta,
-                        delta_unaccel: event.delta_unaccel(),
-                        utime: event.time(),
-                    },
-                );
-                ptr.frame(self);
+                    ptr.motion(
+                        self,
+                        under.clone(),
+                        &MotionEvent {
+                            location: self.pointer_location,
+                            serial,
+                            time: event.time_msec(),
+                        },
+                    );
+                    ptr.relative_motion(
+                        self,
+                        under,
+                        &RelativeMotionEvent {
+                            delta,
+                            delta_unaccel: event.delta_unaccel(),
+                            utime: event.time(),
+                        },
+                    );
+                    ptr.frame(self);
+                }
             }
             InputEvent::PointerButton { event, .. } => {
                 let pointer = self.seat.get_pointer().unwrap();
