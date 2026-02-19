@@ -199,7 +199,7 @@ impl XwmHandler for State {
         let window = Window::new_x11_window(window);
         window.user_data().insert_if_missing(|| {
             RefCell::new(WindowUserData {
-                mode: WindowMode::Tiled,
+                mode: WindowMode::Floating,
             })
         });
         self.workspaces.insert_window(window.clone());

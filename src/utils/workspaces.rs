@@ -18,6 +18,7 @@ use crate::utils::{action::Direction, layout::LayoutState};
 pub enum WindowMode {
     Tiled,
     Floating,
+    Grabed(Rectangle<i32, Logical>),
     Fullscreen(Rectangle<i32, Logical>),
 }
 

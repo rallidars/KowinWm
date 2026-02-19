@@ -17,7 +17,7 @@ pub struct BorderShader(pub GlesPixelProgram);
 
 impl BorderShader {
     pub fn element(
-        renderer: &mut GlowRenderer,
+        renderer: &mut GlesRenderer,
         geo: Rectangle<i32, Logical>,
         alpha: f32,
         border_color: &str,
@@ -50,9 +50,8 @@ impl BorderShader {
     }
 }
 
-pub fn compile_shaders(renderer: &mut GlowRenderer) {
+pub fn compile_shaders(renderer: &mut GlesRenderer) {
     // Compile GLSL file into pixel shader.
-    let renderer: &mut GlesRenderer = renderer.borrow_mut();
     let border_shader = renderer
         .compile_custom_pixel_shader(
             BORDER_SHADER,

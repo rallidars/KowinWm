@@ -23,7 +23,7 @@ use smithay::{
             Display, DisplayHandle,
         },
     },
-    utils::{Logical, Point, Rectangle, Serial, SerialCounter, Size},
+    utils::{Clock, Logical, Monotonic, Point, Rectangle, Serial, SerialCounter, Size},
     wayland::{
         compositor::{self, CompositorClientState, CompositorState},
         input_method::InputMethodManagerState,
@@ -69,6 +69,8 @@ pub struct CalloopData {
 }
 
 pub struct State {
+    pub clock: Clock<Monotonic>,
+
     //something idk
     pub viewporter_state: ViewporterState,
     pub single_pixel_buffer_state: SinglePixelBufferState,
@@ -121,6 +123,8 @@ impl State {
         display: Display<Self>,
         backend_data: UdevData,
     ) -> Self {
+        let clock = Clock::new();
+
         let start_time = Instant::now();
         let dh = display.handle();
 
@@ -199,6 +203,8 @@ impl State {
             .expect("Failed to init wayland server source");
 
         Self {
+            clock,
+
             viewporter_state,
             single_pixel_buffer_state,
             data_control_state,

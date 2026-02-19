@@ -12,6 +12,7 @@ xcursor = "0.3.10"
 serde={version="1.0.228", features=["derive"]}
 toml={ version="0.9", features=["preserve_order"] }
 indexmap ={ version = "2.12.1", features=["serde"]}
+thiserror="2.0.18"
 
 
 [dependencies.smithay]

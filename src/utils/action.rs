@@ -114,7 +114,7 @@ impl Action {
                     WindowMode::Floating => {
                         user_data.mode = WindowMode::Tiled;
                     }
-                    WindowMode::Fullscreen(_) => {}
+                    _ => {}
                 }
                 drop(user_data);
                 state.refresh_layout();
@@ -216,6 +216,7 @@ impl Action {
                     })
                     .unwrap()
                     .clone();
+
                 tracing::info!("start reposition");
                 let start_data = GrabStartData {
                     focus: Some(surface),
@@ -235,18 +236,12 @@ impl Action {
                 )
                     .into();
 
-                window
-                    .user_data()
-                    .get::<RefCell<WindowUserData>>()
-                    .unwrap()
-                    .borrow_mut()
-                    .mode = WindowMode::Floating;
-
                 ws.space.map_element(window.clone(), start_loc, false);
+
                 let grab = MovePointerGrab {
                     start_data,
-                    window,
-                    start_loc,
+                    window: window.clone(),
+                    start_loc: window_geo.loc,
                 };
 
                 pointer.set_grab(state, grab, serial, Focus::Clear);

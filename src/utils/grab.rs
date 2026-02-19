@@ -1,19 +1,24 @@
+use std::cell::RefCell;
+
 use smithay::{
     desktop::{Window, WindowSurface},
     input::pointer::{
-        AxisFrame, ButtonEvent, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
-        GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
-        GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData,
-        MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
+        AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
+        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
+        GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData, MotionEvent, PointerGrab,
+        PointerInnerHandle, RelativeMotionEvent,
     },
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel::{self, ResizeEdge},
         wayland_server::protocol::wl_surface::WlSurface,
     },
-    utils::{IsAlive, Logical, Point, Rectangle, Serial, Size},
+    utils::{IsAlive, Logical, Point, Rectangle, Size},
 };
 
-use crate::state::State;
+use crate::{
+    state::State,
+    utils::workspaces::{WindowMode, WindowUserData},
+};
 
 pub struct MovePointerGrab {
     pub start_data: GrabStartData<State>,
@@ -32,12 +37,19 @@ impl PointerGrab<State> for MovePointerGrab {
         // While the grab is active, no client has pointer focus
         handle.motion(data, None, event);
 
-        let ws = data.workspaces.get_current_mut();
-
-        let delta = event.location - self.start_data.location;
-        let new_location = self.start_loc.to_f64() + delta;
-        ws.space
-            .map_element(self.window.clone(), new_location.to_i32_round(), false);
+        if let Some(window_data) = self.window.user_data().get::<RefCell<WindowUserData>>() {
+            match window_data.borrow().mode {
+                WindowMode::Tiled => {}
+                WindowMode::Floating => {
+                    let ws = data.workspaces.get_current_mut();
+                    let delta = event.location - self.start_data.location;
+                    let new_location = self.start_loc.to_f64() + delta;
+                    ws.space
+                        .map_element(self.window.clone(), new_location.to_i32_round(), false);
+                }
+                _ => {}
+            }
+        }
     }
 
     fn relative_motion(
@@ -58,6 +70,11 @@ impl PointerGrab<State> for MovePointerGrab {
     ) {
         handle.button(data, event);
 
+        data.workspaces.get_current_mut().space.map_element(
+            self.window.clone(),
+            self.start_loc,
+            false,
+        );
         handle.unset_grab(self, data, event.serial, event.time, true);
     }
 
@@ -177,85 +194,95 @@ impl PointerGrab<State> for ResizePointerGrub {
             handle.unset_grab(self, data, event.serial, event.time, true);
             return;
         }
+        if let Some(window_data) = self.window.user_data().get::<RefCell<WindowUserData>>() {
+            match window_data.borrow().mode {
+                WindowMode::Tiled => {}
+                WindowMode::Floating => {
+                    let delta = event.location - self.start_data.location;
 
-        let delta = event.location - self.start_data.location;
+                    let mut new_size = self.start_geo.size;
+                    let mut new_loc = self.start_geo.loc;
 
-        let mut new_size = self.start_geo.size;
-        let mut new_loc = self.start_geo.loc;
+                    match self.edges {
+                        ResizeEdge::Left => {
+                            let dx = delta.x as i32;
+                            new_size.w -= dx;
+                            new_loc.x += dx;
+                        }
+                        ResizeEdge::Top => {
+                            let dy = delta.y as i32;
+                            new_size.h -= dy;
+                            new_loc.y += dy;
+                        }
+                        ResizeEdge::Right => {
+                            new_size.w += delta.x as i32;
+                        }
+                        ResizeEdge::Bottom => {
+                            new_size.h += delta.y as i32;
+                        }
+                        ResizeEdge::TopRight => {
+                            let dy = delta.y as i32;
+                            new_size.h -= dy;
+                            new_loc.y += dy;
+                            new_size.w += delta.x as i32;
+                        }
+                        ResizeEdge::TopLeft => {
+                            let dy = delta.y as i32;
+                            new_size.h -= dy;
+                            new_loc.y += dy;
+                            let dx = delta.x as i32;
+                            new_size.w -= dx;
+                            new_loc.x += dx;
+                        }
+                        ResizeEdge::BottomLeft => {
+                            new_size.h += delta.y as i32;
+                            let dx = delta.x as i32;
+                            new_size.w -= dx;
+                            new_loc.x += dx;
+                        }
+                        ResizeEdge::BottomRight => {
+                            new_size.h += delta.y as i32;
+                            new_size.w += delta.x as i32;
+                        }
+                        _ => {}
+                    }
 
-        match self.edges {
-            ResizeEdge::Left => {
-                let dx = delta.x as i32;
-                new_size.w -= dx;
-                new_loc.x += dx;
+                    // Prevent zero / negative sizes
+                    new_size.w = new_size.w.max(100);
+                    new_size.h = new_size.h.max(100);
+                    let ws = data.workspaces.get_current_mut();
+
+                    match self.edges {
+                        ResizeEdge::Left
+                        | ResizeEdge::Top
+                        | ResizeEdge::TopLeft
+                        | ResizeEdge::BottomLeft => {
+                            ws.space.map_element(self.window.clone(), new_loc, false);
+                        }
+                        _ => {}
+                    }
+
+                    // Send configure to client
+                    match self.window.underlying_surface() {
+                        WindowSurface::Wayland(xdg) => {
+                            xdg.with_pending_state(|state| {
+                                state.states.set(xdg_toplevel::State::Resizing);
+                                state.size = Some(new_size);
+                            });
+
+                            self.window.toplevel().unwrap().send_configure();
+                        }
+                        #[cfg(feature = "xwayland")]
+                        WindowSurface::X11(x11) => {
+                            x11.configure(Rectangle::new(new_loc, new_size)).unwrap();
+                        }
+                    }
+
+                    self.last_window_size = new_size;
+                }
+                _ => {}
             }
-            ResizeEdge::Top => {
-                let dy = delta.y as i32;
-                new_size.h -= dy;
-                new_loc.y += dy;
-            }
-            ResizeEdge::Right => {
-                new_size.w += delta.x as i32;
-            }
-            ResizeEdge::Bottom => {
-                new_size.h += delta.y as i32;
-            }
-            ResizeEdge::TopRight => {
-                let dy = delta.y as i32;
-                new_size.h -= dy;
-                new_loc.y += dy;
-                new_size.w += delta.x as i32;
-            }
-            ResizeEdge::TopLeft => {
-                let dy = delta.y as i32;
-                new_size.h -= dy;
-                new_loc.y += dy;
-                let dx = delta.x as i32;
-                new_size.w -= dx;
-                new_loc.x += dx;
-            }
-            ResizeEdge::BottomLeft => {
-                new_size.h += delta.y as i32;
-                let dx = delta.x as i32;
-                new_size.w -= dx;
-                new_loc.x += dx;
-            }
-            ResizeEdge::BottomRight => {
-                new_size.h += delta.y as i32;
-                new_size.w += delta.x as i32;
-            }
-            _ => {}
         }
-
-        // Prevent zero / negative sizes
-        new_size.w = new_size.w.max(100);
-        new_size.h = new_size.h.max(100);
-        let ws = data.workspaces.get_current_mut();
-
-        match self.edges {
-            ResizeEdge::Left | ResizeEdge::Top | ResizeEdge::TopLeft | ResizeEdge::BottomLeft => {
-                ws.space.map_element(self.window.clone(), new_loc, false);
-            }
-            _ => {}
-        }
-
-        // Send configure to client
-        match self.window.underlying_surface() {
-            WindowSurface::Wayland(xdg) => {
-                xdg.with_pending_state(|state| {
-                    state.states.set(xdg_toplevel::State::Resizing);
-                    state.size = Some(new_size);
-                });
-
-                self.window.toplevel().unwrap().send_configure();
-            }
-            #[cfg(feature = "xwayland")]
-            WindowSurface::X11(x11) => {
-                x11.configure(Rectangle::new(new_loc, new_size)).unwrap();
-            }
-        }
-
-        self.last_window_size = new_size;
     }
 
     fn relative_motion(

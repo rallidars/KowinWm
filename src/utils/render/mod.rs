@@ -8,7 +8,7 @@ use smithay::{
                 surface::WaylandSurfaceRenderElement, texture::TextureRenderElement, Element, Id,
                 RenderElement,
             },
-            gles::{element::PixelShaderElement, GlesFrame, GlesTexture, Uniform},
+            gles::{element::PixelShaderElement, GlesFrame, GlesRenderer, GlesTexture, Uniform},
             glow::{GlowFrame, GlowRenderer},
             multigpu::{self, gbm::GbmGlesBackend, MultiFrame, MultiRenderer},
             utils::{CommitCounter, DamageSet},
@@ -21,8 +21,8 @@ use smithay::{
 pub type GlMultiRenderer<'a> = MultiRenderer<
     'a,
     'a,
-    GbmGlesBackend<GlowRenderer, DrmDeviceFd>,
-    GbmGlesBackend<GlowRenderer, DrmDeviceFd>,
+    GbmGlesBackend<GlesRenderer, DrmDeviceFd>,
+    GbmGlesBackend<GlesRenderer, DrmDeviceFd>,
 >;
 pub type GlMultiFrame<'a, 'frame> = MultiFrame<
     'a,
@@ -34,8 +34,8 @@ pub type GlMultiFrame<'a, 'frame> = MultiFrame<
 >;
 
 pub type MultiError<'a> = multigpu::Error<
-    GbmGlesBackend<GlowRenderer, DrmDeviceFd>,
-    GbmGlesBackend<GlowRenderer, DrmDeviceFd>,
+    GbmGlesBackend<GlesRenderer, DrmDeviceFd>,
+    GbmGlesBackend<GlesRenderer, DrmDeviceFd>,
 >;
 pub enum CustomRenderElements<R>
 where
@@ -141,7 +141,7 @@ impl<'a> RenderElement<GlMultiRenderer<'a>> for CustomRenderElements<GlMultiRend
         opaque_regions: &[Rectangle<i32, Physical>],
     ) -> Result<(), <GlMultiRenderer<'a> as RendererSuper>::Error> {
         match self {
-            CustomRenderElements::Texture(elem) => RenderElement::<GlowRenderer>::draw(
+            CustomRenderElements::Texture(elem) => RenderElement::<GlesRenderer>::draw(
                 elem,
                 frame.as_mut(),
                 src,
@@ -153,7 +153,7 @@ impl<'a> RenderElement<GlMultiRenderer<'a>> for CustomRenderElements<GlMultiRend
             CustomRenderElements::Window(elem) => {
                 elem.draw(frame, src, dst, damage, opaque_regions)
             }
-            CustomRenderElements::Shader(elem) => RenderElement::<GlowRenderer>::draw(
+            CustomRenderElements::Shader(elem) => RenderElement::<GlesRenderer>::draw(
                 elem,
                 frame.as_mut(),
                 src,
