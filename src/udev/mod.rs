@@ -316,7 +316,9 @@ impl State {
                 let surface = device.surfaces.get_mut(&crtc).unwrap();
                 surface.drm_output.frame_submitted().ok();
                 tracing::debug!("VBlank event on {:?}", crtc);
-                self.render(node, crtc).unwrap();
+                if let Err(err) = self.render(node, crtc) {
+                    tracing::error!("{}", err);
+                }
             }
             drm::DrmEvent::Error(_) => {}
         }

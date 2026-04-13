@@ -38,7 +38,6 @@ use smithay::{
     wayland::shell::wlr_layer::Layer,
 };
 
-pub static FALLBACK_CURSOR_DATA: &[u8] = include_bytes!("../../resources/cursor.rgba");
 pub struct Surface {
     pub _device_id: DrmNode,
     pub _render_node: DrmNode,
@@ -66,9 +65,7 @@ impl State {
 
         let ws = self.workspaces.get_current();
         let output = ws.space.outputs().next().unwrap();
-
-        let scale = Scale::from(1.0);
-        let physical_scale = 1;
+        let scale = Scale::from(output.current_scale().fractional_scale());
 
         // ------------------------------------------------------------
         // Render element collection (NO allocations inside loops)
@@ -105,7 +102,7 @@ impl State {
                 >(
                     layer_surface,
                     &mut renderer,
-                    geo.loc.to_physical_precise_round(physical_scale),
+                    geo.loc.to_f64().to_physical(scale).to_i32_round(),
                     scale,
                     1.0,
                 ) {
@@ -123,9 +120,12 @@ impl State {
 
         if let Some(win) = fullscreen {
             let loc = ws.space.element_location(win).unwrap();
-            for elem in
-                win.render_elements(&mut renderer, loc.to_physical(physical_scale), scale, 1.0)
-            {
+            for elem in win.render_elements(
+                &mut renderer,
+                loc.to_f64().to_physical(scale).to_i32_round(),
+                scale,
+                1.0,
+            ) {
                 elements.push(CustomRenderElements::Window(elem));
             }
         } else {
@@ -135,37 +135,48 @@ impl State {
                 let loc = ws.space.element_location(&window).unwrap();
                 let win_geo = window.geometry();
 
+                // Window content
+                let offset = loc - win_geo.loc;
+                for elem in window.render_elements(
+                    &mut renderer,
+                    offset.to_f64().to_physical(scale).to_i32_round(),
+                    scale,
+                    1.0,
+                ) {
+                    elements.push(CustomRenderElements::Window(elem));
+                }
+
                 // Border
                 let mut border_geo = geo;
                 border_geo.size += (border.thickness * 2, border.thickness * 2).into();
                 border_geo.loc -= (border.thickness, border.thickness).into();
 
-                let color = if Some(window) == active {
-                    border.active.clone()
+                let (start, end) = if Some(window) == active {
+                    (
+                        border.active.clone(),
+                        border.end_active.clone().unwrap_or(border.active.clone()),
+                    )
                 } else {
-                    border.inactive.clone()
+                    (
+                        border.inactive.clone(),
+                        border
+                            .end_inactive
+                            .clone()
+                            .unwrap_or(border.inactive.clone()),
+                    )
                 };
 
                 let border_elem = BorderShader::element(
                     renderer.as_mut(),
                     border_geo,
                     1.0,
-                    &color,
+                    border.angle.unwrap_or(0.0),
+                    &start,
+                    &end,
                     border.thickness as f32,
                 );
 
                 elements.push(CustomRenderElements::Shader(border_elem));
-
-                // Window content
-                let offset = loc - win_geo.loc;
-                for elem in window.render_elements(
-                    &mut renderer,
-                    offset.to_physical(physical_scale),
-                    scale,
-                    1.0,
-                ) {
-                    elements.push(CustomRenderElements::Window(elem));
-                }
             }
         }
 
@@ -183,7 +194,7 @@ impl State {
                 >(
                     layer_surface,
                     &mut renderer,
-                    geo.loc.to_physical_precise_round(physical_scale),
+                    geo.loc.to_f64().to_physical(scale).to_i32_round(),
                     scale,
                     1.0,
                 ) {

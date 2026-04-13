@@ -1,7 +1,8 @@
 use crate::{
     state::State,
-    udev::surface::{Surface, FALLBACK_CURSOR_DATA},
+    udev::surface::Surface,
     utils::render::{border::compile_shaders, CustomRenderElements, GlMultiRenderer},
+    FALLBACK_CURSOR_DATA,
 };
 use smithay::{
     backend::{
@@ -35,13 +36,13 @@ use smithay::{
         gbm::Modifier,
         rustix::fs::OFlags,
     },
-    utils::{DeviceFd, Transform},
+    utils::{DeviceFd, Logical, Point, Transform},
 };
 use smithay_drm_extras::{
     display_info::{self},
     drm_scanner::DrmScanner,
 };
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, fmt::LowerExp, path::PathBuf};
 
 const SUPPORTED_FORMATS: &[Fourcc] = &[
     Fourcc::Abgr2101010,
@@ -253,23 +254,31 @@ impl State {
         let global = output.create_global::<State>(&self.display_handle);
 
         let mut output_mode = WlMode::from(drm_mode);
-        if let Some(config) = config_output {
-            output_mode.refresh = config.refresh_rate * 1000;
-            output_mode.size = config.resolution.into();
-            output.set_preferred(output_mode);
-            output.change_current_state(
-                Some(output_mode),
-                Some(Transform::Normal),
-                Some(smithay::output::Scale::Fractional(config.scale)),
-                None,
-            );
+        let (transform, scale, position) = if let Some(config) = &config_output {
+            // Override refresh rate if provided
+            if let Some(refresh) = config.refresh_rate {
+                output_mode.refresh = refresh * 1000;
+            }
+            // Override resolution if provided
+            if let Some(res) = config.resolution {
+                output_mode.size = res.into();
+            }
+            // Parse transform, scale, and position (with typo preserved)
+            let transform = config.transform.clone().and_then(parse_transform);
+            let scale = config.scale.map(|s| smithay::output::Scale::Fractional(s));
+            let position: Option<Point<i32, Logical>> = config.possition.map(Into::into); // note: field name typo
+            (transform, scale, position)
         } else {
-            output.set_preferred(output_mode);
-            output.change_current_state(Some(output_mode), None, None, None);
-        }
+            (None, None, None)
+        };
 
-        for ws in self.workspaces.workspaces.iter_mut() {
-            ws.space.map_output(&output, output.current_location());
+        output.set_preferred(output_mode);
+        output.change_current_state(Some(output_mode), transform, scale, position);
+        tracing::info!("{:?}", output.current_mode());
+
+        for (index, ws) in self.workspaces.workspaces.iter_mut().enumerate() {
+            ws.space
+                .map_output(&output, position.unwrap_or((0, 0).into()));
         }
 
         let driver = match device.drm_output_manager.device().get_driver() {
@@ -342,5 +351,19 @@ impl State {
         device.surfaces.insert(crtc, surface);
 
         self.render(node, crtc).ok();
+    }
+}
+
+fn parse_transform(s: String) -> Option<Transform> {
+    match s.to_lowercase().as_str() {
+        "normal" => Some(Transform::Normal),
+        "90" | "90°" | "rotated90" => Some(Transform::_90),
+        "180" | "180°" | "rotated180" => Some(Transform::_180),
+        "270" | "270°" | "rotated270" => Some(Transform::_270),
+        "flipped" => Some(Transform::Flipped),
+        "flipped-90" | "flipped90" => Some(Transform::Flipped90),
+        "flipped-180" | "flipped180" => Some(Transform::Flipped180),
+        "flipped-270" | "flipped270" => Some(Transform::Flipped270),
+        _ => None,
     }
 }

@@ -4,6 +4,7 @@ use smithay::{
 };
 
 pub enum LayoutState {
+    Floating,
     MasterStack(MasterStack),
 }
 
@@ -30,6 +31,9 @@ impl LayoutBehavior for LayoutState {
         I: Iterator<Item = &'a Window> + ExactSizeIterator,
     {
         match self {
+            LayoutState::Floating => {
+                vec![]
+            }
             LayoutState::MasterStack(layout) => layout.placement(windows, area),
         }
     }

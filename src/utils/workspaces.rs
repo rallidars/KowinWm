@@ -22,12 +22,7 @@ pub enum WindowMode {
     Fullscreen(Rectangle<i32, Logical>),
 }
 
-pub struct WindowUserData {
-    pub mode: WindowMode,
-}
-
 pub struct Workspace {
-    pub full_geo: Option<Rectangle<i32, Logical>>,
     pub space: Space<Window>,
     pub layout: LayoutState,
     pub active_window: Option<Window>,
@@ -37,7 +32,6 @@ pub struct Workspace {
 impl Workspace {
     pub fn new() -> Self {
         Self {
-            full_geo: None,
             space: Space::default(),
             layout: LayoutState::default(),
             active_window: None,
@@ -59,14 +53,6 @@ impl Workspaces {
             active_workspace: 0,
             prev_workspace: 0,
         }
-    }
-
-    pub fn set_active_window(&mut self, window: Option<Window>) {
-        self.get_current_mut().active_window = window
-    }
-
-    pub fn get_active_window(&self) -> Option<Window> {
-        self.get_current().active_window.clone()
     }
 
     pub fn get_current_mut(&mut self) -> &mut Workspace {
@@ -97,51 +83,68 @@ impl Workspaces {
         if self.active_workspace == ws_index {
             return;
         }
-        let active = match self.get_active_window() {
+        let ws = self.get_current_mut();
+        let active = match ws.get_active_window() {
             Some(index) => index,
             None => return,
         };
 
-        let ws = self.get_current_mut();
         let loc = ws.space.element_location(&active);
+        ws.insert_window(active.clone(), 0);
         ws.space.unmap_elem(&active);
         self.set_active_workspace(ws_index);
-        self.insert_window(active.clone());
         if let Some(loc) = loc {
             self.get_current_mut()
                 .space
                 .map_element(active.clone(), loc, false);
         }
     }
-
-    pub fn remove_window(&mut self, window: &Window) {
-        let ws = self.get_current_mut();
-        ws.space.unmap_elem(window);
-        ws.active_window = None;
+}
+impl Workspace {
+    pub fn set_active_window(&mut self, window: Option<Window>) {
+        self.active_window = window
     }
 
-    pub fn insert_window(&mut self, window: Window) {
-        let ws = self.get_current_mut();
-        ws.active_window = Some(window.clone());
-        ws.space.map_element(window, (0, 0), true);
+    pub fn get_active_window(&self) -> Option<Window> {
+        self.active_window.clone()
+    }
+    pub fn remove_window(&mut self, window: &Window) {
+        self.space.unmap_elem(window);
+        self.active_window = None;
+    }
+
+    pub fn insert_window(&mut self, window: Window, offset: i32) {
+        match self.layout {
+            crate::utils::layout::LayoutState::Floating => {
+                window
+                    .user_data()
+                    .insert_if_missing(|| RefCell::new(WindowMode::Floating));
+                place_on_center(&mut self.space, &window, offset);
+            }
+            _ => {
+                window
+                    .user_data()
+                    .insert_if_missing(|| RefCell::new(WindowMode::Tiled));
+                self.space.map_element(window.clone(), (0, 0), true);
+            }
+        }
+        self.active_window = Some(window.clone());
     }
 
     pub fn change_focus(&mut self, direction: &Direction, loc: &mut Point<f64, Logical>) {
-        let ws = self.get_current();
         let focused = self.get_active_window();
-        if let Some((window, _)) = best_window(direction, &ws.space, focused) {
-            *loc = window_center(&ws.space, &window).unwrap();
+        if let Some((window, _)) = best_window(direction, &self.space, focused) {
+            *loc = window_center(&self.space, &window).unwrap();
         }
     }
 
     pub fn move_window(&mut self, direction: &Direction, loc: &mut Point<f64, Logical>) {
-        let ws = self.get_current();
         let Some(focused) = self.get_active_window() else {
             return;
         };
 
         // Find the best window to swap with
-        let Some((best, _)) = best_window(direction, &ws.space, Some(focused.clone())) else {
+        let Some((best, _)) = best_window(direction, &self.space, Some(focused.clone())) else {
             return;
         };
 
@@ -150,18 +153,17 @@ impl Workspaces {
             return;
         }
 
-        let focused_pos = match ws.space.element_location(&focused) {
+        let focused_pos = match self.space.element_location(&focused) {
             Some(pos) => pos,
             None => return,
         };
-        let best_pos = match ws.space.element_location(&best) {
+        let best_pos = match self.space.element_location(&best) {
             Some(w) => w,
             None => return,
         };
-        *loc = window_center(&ws.space, &best).unwrap();
-        let ws = self.get_current_mut();
-        ws.space.map_element(focused, best_pos, false);
-        ws.space.map_element(best, focused_pos, false);
+        *loc = window_center(&self.space, &best).unwrap();
+        self.space.map_element(focused, best_pos, false);
+        self.space.map_element(best, focused_pos, false);
     }
 
     fn render_elements(&self) {}
@@ -172,11 +174,10 @@ where
     I: Iterator<Item = &'a Window>,
 {
     for element in elements {
-        match element
+        match *element
             .user_data()
-            .get::<RefCell<WindowUserData>>()?
+            .get::<RefCell<WindowMode>>()?
             .borrow_mut()
-            .mode
         {
             WindowMode::Fullscreen(_) => return Some(element),
             _ => {}
@@ -207,8 +208,22 @@ pub fn best_window(
     ));
 
     let mut best: Option<(Window, i32)> = None;
+    let current_mode = match focused.user_data().get::<RefCell<WindowMode>>() {
+        Some(mode) => mode.borrow(),
+        None => return None,
+    };
 
-    for window in space.elements() {
+    let elements = space.elements().filter(|w| {
+        w.user_data()
+            .get::<RefCell<WindowMode>>()
+            .map(|d| {
+                *d.borrow() == *current_mode
+                    && matches!(*current_mode, WindowMode::Tiled | WindowMode::Floating)
+            })
+            .unwrap_or(false)
+    });
+
+    for window in elements {
         if window == &focused {
             continue;
         }
@@ -246,7 +261,7 @@ pub fn best_window(
     best
 }
 
-pub fn place_on_center(space: &mut Space<Window>, window: &Window) {
+pub fn place_on_center(space: &mut Space<Window>, window: &Window, offset: i32) {
     let output = match space.outputs().next().cloned() {
         Some(o) => o,
         None => return,
@@ -268,11 +283,19 @@ pub fn place_on_center(space: &mut Space<Window>, window: &Window) {
         });
     }
 
-    let window_geo = window.geometry();
-    let x = area.loc.x + (area.size.w - window_geo.size.w) / 2;
-    let y = area.loc.y + (area.size.h - window_geo.size.h) / 2;
+    let window_geo = space.element_geometry(&window);
+    match window_geo {
+        Some(geo) => {
+            let x = area.loc.x + (area.size.w - geo.size.w) / 2;
+            let y = area.loc.y + (area.size.h - geo.size.h) / 2;
 
-    let location = Point::from((x, y));
+            let location = Point::from((x, y));
 
-    space.map_element(window.clone(), location, false);
+            space.map_element(window.clone(), location, true);
+        }
+        None => {
+            let location = Point::from((area.loc.x + offset, area.loc.y + offset));
+            space.map_element(window.clone(), location, true);
+        }
+    }
 }

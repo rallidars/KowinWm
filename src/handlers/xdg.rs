@@ -3,16 +3,20 @@ use std::cell::RefCell;
 use smithay::{
     delegate_data_control, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
-        find_popup_root_surface, layer_map_for_output, PopupKeyboardGrab, PopupKind,
-        PopupPointerGrab, PopupUngrabStrategy, Window, WindowSurfaceType,
+        find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
+        PopupKeyboardGrab, PopupKind, PopupPointerGrab, PopupUngrabStrategy, Window,
+        WindowSurfaceType,
     },
     input::{pointer::Focus, Seat},
     output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
-        wayland_server::protocol::{wl_seat, wl_surface::WlSurface},
+        wayland_server::{
+            protocol::{wl_seat, wl_surface::WlSurface},
+            Resource,
+        },
     },
-    utils::Serial,
+    utils::{Rectangle, Serial},
     wayland::{
         seat::WaylandFocus,
         selection::wlr_data_control::{DataControlHandler, DataControlState},
@@ -31,7 +35,7 @@ use crate::{
     state::State,
     utils::{
         grab::{MovePointerGrab, ResizePointerGrub},
-        workspaces::{WindowMode, WindowUserData},
+        workspaces::WindowMode,
     },
 };
 
@@ -57,12 +61,11 @@ impl XdgShellHandler for State {
             .find(|w| w.toplevel().map(|s| s == &surface).unwrap_or(false))
             .cloned()
             .unwrap();
-        window
+        *window
             .user_data()
-            .get::<RefCell<WindowUserData>>()
+            .get::<RefCell<WindowMode>>()
             .unwrap()
-            .borrow_mut()
-            .mode = WindowMode::Fullscreen(ws.space.element_geometry(&window).unwrap());
+            .borrow_mut() = WindowMode::Fullscreen(ws.space.element_geometry(&window).unwrap());
         ws.space.map_element(window.clone(), (0, 0), false);
         let geo = ws.space.output_geometry(&output).unwrap();
         surface.with_pending_state(|state| {
@@ -84,10 +87,9 @@ impl XdgShellHandler for State {
 
         let window_mode = window
             .user_data()
-            .get::<RefCell<WindowUserData>>()
+            .get::<RefCell<WindowMode>>()
             .unwrap()
             .borrow()
-            .mode
             .clone();
         if let WindowMode::Fullscreen(prev_geo) = window_mode {
             surface.with_pending_state(|state| {
@@ -97,12 +99,22 @@ impl XdgShellHandler for State {
             });
 
             ws.space.map_element(window.clone(), prev_geo.loc, false);
-            window
-                .user_data()
-                .get::<RefCell<WindowUserData>>()
-                .unwrap()
-                .borrow_mut()
-                .mode = WindowMode::Tiled;
+            match ws.layout {
+                crate::utils::layout::LayoutState::Floating => {
+                    *window
+                        .user_data()
+                        .get::<RefCell<WindowMode>>()
+                        .unwrap()
+                        .borrow_mut() = WindowMode::Floating;
+                }
+                _ => {
+                    *window
+                        .user_data()
+                        .get::<RefCell<WindowMode>>()
+                        .unwrap()
+                        .borrow_mut() = WindowMode::Tiled;
+                }
+            }
 
             surface.send_configure();
 
@@ -113,51 +125,18 @@ impl XdgShellHandler for State {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let window = Window::new_wayland_window(surface);
         self.set_keyboard_focus(window.wl_surface().map(|s| s.as_ref().clone()));
-        window.user_data().insert_if_missing(|| {
-            RefCell::new(WindowUserData {
-                mode: WindowMode::Tiled,
-            })
-        });
-        self.workspaces.insert_window(window.clone());
+        self.workspaces.get_current_mut().insert_window(
+            window.clone(),
+            self.config.border.gap + self.config.border.thickness,
+        );
         self.refresh_layout();
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
         tracing::info!("new_popup");
-        let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(surface.clone())) else {
-            return;
-        };
 
-        let Some(window) = self
-            .workspaces
-            .get_current()
-            .space
-            .elements()
-            .find(|w| w.wl_surface().unwrap().as_ref() == &root)
-            .clone()
-        else {
-            return;
-        };
+        self.unconstrain_popup(&surface);
 
-        let mut outputs_for_window = self
-            .workspaces
-            .get_current()
-            .space
-            .outputs_for_element(&window);
-
-        if outputs_for_window.is_empty() {
-            return;
-        }
-
-        let window_geo = window.geometry();
-
-        tracing::info!("geometry_new_popup: {:?}", window_geo);
-
-        let geometry = positioner.get_unconstrained_geometry(window_geo);
-
-        surface.with_pending_state(|state| {
-            state.geometry = geometry;
-        });
         if let Err(err) = self.popup_manager.track_popup(PopupKind::from(surface)) {
             tracing::warn!("Failed to track popup: {}", err);
         }
@@ -176,8 +155,9 @@ impl XdgShellHandler for State {
             })
             .unwrap()
             .clone();
-        self.workspaces.remove_window(&window);
-        self.workspaces.get_current_mut().active_window = None;
+        let ws = self.workspaces.get_current_mut();
+        ws.remove_window(&window);
+        ws.set_active_window(None);
         self.refresh_layout();
     }
 
@@ -235,32 +215,12 @@ impl XdgShellHandler for State {
         positioner: PositionerState,
         token: u32,
     ) {
-        tracing::info!("new_popup_repo");
         surface.with_pending_state(|state| {
-            state.geometry = positioner.get_geometry();
-            state.positioner = positioner
+            let geometry = positioner.get_geometry();
+            state.geometry = geometry;
+            state.positioner = positioner;
         });
-        let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(surface.clone())) else {
-            return;
-        };
-
-        let Some(window) = self
-            .workspaces
-            .get_current()
-            .space
-            .elements()
-            .find(|w| w.wl_surface().unwrap().as_ref() == &root)
-            .clone()
-        else {
-            return;
-        };
-
-        let geometry = window.geometry();
-        tracing::info!("geometry_reposition_request: {:?}", geometry);
-
-        surface.with_pending_state(|state| {
-            state.geometry = positioner.get_unconstrained_geometry(geometry);
-        });
+        self.unconstrain_popup(&surface);
 
         surface.send_repositioned(token);
     }
@@ -340,9 +300,10 @@ impl XdgShellHandler for State {
     fn ack_configure(
         &mut self,
         _surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
-        _configure: Configure,
+        configure: Configure,
     ) {
         tracing::info!("ack_configure request");
+        if let Configure::Toplevel(configure) = configure {}
     }
 }
 
@@ -426,3 +387,64 @@ impl DataControlHandler for State {
 }
 
 delegate_data_control!(State);
+
+impl State {
+    pub(crate) fn unconstrain_popup(&self, popup: &PopupSurface) {
+        let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(popup.clone())) else {
+            return;
+        };
+
+        let ws = self.workspaces.get_current();
+
+        // Try window path first, then layer shell path
+        if let Some(window) = self.window_for_surface(&root) {
+            let mut outputs_for_window = ws.space.outputs_for_element(&window);
+            if outputs_for_window.is_empty() {
+                return;
+            }
+
+            let mut outputs_geo = ws
+                .space
+                .output_geometry(&outputs_for_window.pop().unwrap())
+                .unwrap();
+            for output in outputs_for_window {
+                outputs_geo = outputs_geo.merge(ws.space.output_geometry(&output).unwrap());
+            }
+
+            let window_loc = ws.space.element_geometry(&window).unwrap().loc;
+            let mut target = outputs_geo;
+            target.loc -= get_popup_toplevel_coords(&PopupKind::Xdg(popup.clone()));
+            target.loc -= window_loc;
+
+            popup.with_pending_state(|state| {
+                state.geometry = state.positioner.get_unconstrained_geometry(target);
+                clamp_popup_to_target(&mut state.geometry, target);
+            });
+        } else {
+            tracing::info!("no parent popup");
+        }
+    }
+}
+
+fn clamp_popup_to_target(
+    geo: &mut Rectangle<i32, smithay::utils::Logical>,
+    target: Rectangle<i32, smithay::utils::Logical>,
+) {
+    // Slide horizontally
+    let right_overshoot = (geo.loc.x + geo.size.w) - (target.loc.x + target.size.w);
+    if right_overshoot > 0 {
+        geo.loc.x -= right_overshoot;
+    }
+    if geo.loc.x < target.loc.x {
+        geo.loc.x = target.loc.x;
+    }
+
+    // Slide vertically
+    let bottom_overshoot = (geo.loc.y + geo.size.h) - (target.loc.y + target.size.h);
+    if bottom_overshoot > 0 {
+        geo.loc.y -= bottom_overshoot;
+    }
+    if geo.loc.y < target.loc.y {
+        geo.loc.y = target.loc.y;
+    }
+}

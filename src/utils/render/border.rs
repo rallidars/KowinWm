@@ -20,7 +20,9 @@ impl BorderShader {
         renderer: &mut GlesRenderer,
         geo: Rectangle<i32, Logical>,
         alpha: f32,
-        border_color: &str,
+        angle: f32,
+        active: &str,
+        end_acitve: &str,
         border_thickness: f32,
     ) -> PixelShaderElement {
         let program = renderer
@@ -31,16 +33,16 @@ impl BorderShader {
             .0
             .clone();
 
-        let angle = 0.0 * std::f32::consts::PI;
+        let angle = angle * std::f32::consts::PI;
         let gradient_direction = [angle.cos(), angle.sin()];
         PixelShaderElement::new(
             program,
             geo,
             None,
-            1.0,
+            alpha,
             vec![
-                Uniform::new("startColor", hex_to_rgb(border_color).unwrap()),
-                Uniform::new("endColor", hex_to_rgb(border_color).unwrap()),
+                Uniform::new("startColor", hex_to_rgb(active).unwrap()),
+                Uniform::new("endColor", hex_to_rgb(end_acitve).unwrap()),
                 Uniform::new("thickness", border_thickness),
                 Uniform::new("halfThickness", border_thickness * 0.5),
                 Uniform::new("gradientDirection", gradient_direction),

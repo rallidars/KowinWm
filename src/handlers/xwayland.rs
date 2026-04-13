@@ -27,10 +27,10 @@ use smithay::{
     xwayland::{X11Wm, XWaylandEvent, XwmHandler},
 };
 
-use crate::utils::workspaces::{WindowMode, WindowUserData};
+use crate::utils::workspaces::WindowMode;
+use crate::FALLBACK_CURSOR_DATA;
 use crate::{
     state::State,
-    udev::FALLBACK_CURSOR_DATA,
     utils::grab::{MovePointerGrab, ResizePointerGrub},
     SERIAL_COUNTER,
 };
@@ -138,6 +138,63 @@ impl XwmHandler for State {
         _window: smithay::xwayland::X11Surface,
     ) {
     }
+    fn map_window_request(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
+        window.set_mapped(true).unwrap();
+        let window = Window::new_x11_window(window);
+        self.workspaces.get_current_mut().insert_window(
+            window.clone(),
+            self.config.border.gap + self.config.border.thickness,
+        );
+        let bbox = self
+            .workspaces
+            .get_current_mut()
+            .space
+            .element_bbox(&window)
+            .unwrap();
+        let Some(xsurface) = window.x11_surface() else {
+            unreachable!()
+        };
+        xsurface.configure(Some(bbox)).unwrap();
+        self.refresh_layout();
+        tracing::info!("map_window_xwayland");
+    }
+
+    fn mapped_override_redirect_window(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
+        let location = window.geometry().loc;
+        let window = Window::new_x11_window(window);
+        self.workspaces
+            .get_current_mut()
+            .space
+            .map_element(window.clone(), location, true);
+    }
+    fn unmapped_window(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
+        let ws = self.workspaces.get_current_mut();
+        let maybe = ws
+            .space
+            .elements()
+            .find(|e| matches!(e.x11_surface(), Some(w) if w == &window))
+            .cloned();
+        if let Some(elem) = maybe {
+            ws.space.unmap_elem(&elem);
+        }
+        if !window.is_override_redirect() {
+            window.set_mapped(false).unwrap();
+            ws.active_window = None
+        }
+        tracing::info!("unmapped")
+    }
 
     fn fullscreen_request(
         &mut self,
@@ -163,7 +220,12 @@ impl XwmHandler for State {
             .expect("No outputs found");
         let geometry = ws.space.output_geometry(output).unwrap();
         window.set_fullscreen(true).unwrap();
-        ws.full_geo = Some(window.geometry());
+        *window
+            .user_data()
+            .get::<RefCell<WindowMode>>()
+            .unwrap()
+            .borrow_mut() = WindowMode::Fullscreen(geometry);
+
         window.configure(geometry).unwrap();
         ws.space.map_element(elem.clone(), geometry.loc, false);
     }
@@ -183,51 +245,34 @@ impl XwmHandler for State {
             Some(e) => e,
             None => return,
         };
-        window.set_fullscreen(false).unwrap();
-        window.configure(ws.full_geo).unwrap();
-        ws.space
-            .map_element(elem.clone(), ws.full_geo.unwrap().loc, false);
-        ws.full_geo.take();
-    }
+        let window_mode = window
+            .user_data()
+            .get::<RefCell<WindowMode>>()
+            .unwrap()
+            .borrow()
+            .clone();
+        if let WindowMode::Fullscreen(prev_geo) = window_mode {
+            window.set_fullscreen(false).unwrap();
 
-    fn map_window_request(
-        &mut self,
-        _xwm: smithay::xwayland::xwm::XwmId,
-        window: smithay::xwayland::X11Surface,
-    ) {
-        window.set_mapped(true).unwrap();
-        let window = Window::new_x11_window(window);
-        window.user_data().insert_if_missing(|| {
-            RefCell::new(WindowUserData {
-                mode: WindowMode::Floating,
-            })
-        });
-        self.workspaces.insert_window(window.clone());
-        let bbox = self
-            .workspaces
-            .get_current_mut()
-            .space
-            .element_bbox(&window)
-            .unwrap();
-        let Some(xsurface) = window.x11_surface() else {
-            unreachable!()
-        };
-        xsurface.configure(Some(bbox)).unwrap();
-        self.refresh_layout();
-        tracing::info!("map_window_xwayland");
-    }
-    fn mapped_override_redirect_window(
-        &mut self,
-        _xwm: smithay::xwayland::xwm::XwmId,
-        window: smithay::xwayland::X11Surface,
-    ) {
-        let location = window.geometry().loc;
-        tracing::info!("mapped_over: {:?}", location);
-        let window = Window::new_x11_window(window);
-        self.workspaces
-            .get_current_mut()
-            .space
-            .map_element(window.clone(), location, true);
+            window.configure(prev_geo).unwrap();
+            ws.space.map_element(elem.clone(), prev_geo.loc, false);
+            match ws.layout {
+                crate::utils::layout::LayoutState::Floating => {
+                    *window
+                        .user_data()
+                        .get::<RefCell<WindowMode>>()
+                        .unwrap()
+                        .borrow_mut() = WindowMode::Floating;
+                }
+                _ => {
+                    *window
+                        .user_data()
+                        .get::<RefCell<WindowMode>>()
+                        .unwrap()
+                        .borrow_mut() = WindowMode::Tiled;
+                }
+            }
+        }
     }
 
     fn destroyed_window(
@@ -330,41 +375,22 @@ impl XwmHandler for State {
             return;
         };
 
-        let pointer = self.seat.get_pointer().unwrap();
-        let start_data = pointer.grab_start_data().unwrap();
+        if let Some(ptr) = self.seat.get_pointer() {
+            let start_data = ptr.grab_start_data().unwrap();
+            let window_geo = match ws.space.element_geometry(&element) {
+                Some(l) => l,
+                None => return,
+            };
 
-        let window_geo = match ws.space.element_geometry(&element) {
-            Some(l) => l,
-            None => return,
-        };
-
-        let grab = ResizePointerGrub {
-            start_data,
-            window: element.clone(),
-            edges: x11_resize_edge_to_xdg(resize_edge),
-            start_geo: window_geo,
-            last_window_size: window_geo.size,
-        };
-        pointer.set_grab(self, grab, SERIAL_COUNTER.next_serial(), Focus::Clear);
-    }
-    fn unmapped_window(
-        &mut self,
-        _xwm: smithay::xwayland::xwm::XwmId,
-        window: smithay::xwayland::X11Surface,
-    ) {
-        let ws = self.workspaces.get_current_mut();
-        let maybe = ws
-            .space
-            .elements()
-            .find(|e| matches!(e.x11_surface(), Some(w) if w == &window))
-            .cloned();
-        if let Some(elem) = maybe {
-            self.workspaces.remove_window(&elem);
+            let grab = ResizePointerGrub {
+                start_data,
+                window: element.clone(),
+                edges: x11_resize_edge_to_xdg(resize_edge),
+                start_geo: window_geo,
+                last_window_size: window_geo.size,
+            };
+            ptr.set_grab(self, grab, SERIAL_COUNTER.next_serial(), Focus::Clear);
         }
-        if !window.is_override_redirect() {
-            window.set_mapped(false).unwrap();
-        }
-        tracing::info!("unmapped")
     }
 
     fn allow_selection_access(

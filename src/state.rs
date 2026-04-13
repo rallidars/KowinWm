@@ -7,28 +7,29 @@ use std::{
 
 use smithay::{
     backend::session::Session,
-    desktop::{
-        layer_map_for_output, space::SpaceElement, PopupKind, PopupManager, Space, Window,
-        WindowSurface, WindowSurfaceType,
+    desktop::{layer_map_for_output, PopupManager, Window, WindowSurface, WindowSurfaceType},
+    input::{
+        keyboard::{Keysym, XkbConfig},
+        pointer::PointerHandle,
+        Seat, SeatState,
     },
-    input::{keyboard::XkbConfig, pointer::PointerHandle, Seat, SeatState},
     reexports::{
-        calloop::{
-            generic::Generic, EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
-        },
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        calloop::{generic::Generic, Interest, LoopHandle, LoopSignal, Mode, PostAction},
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::wl_surface::WlSurface,
             Display, DisplayHandle,
         },
     },
-    utils::{Clock, Logical, Monotonic, Point, Rectangle, Serial, SerialCounter, Size},
+    utils::{Clock, Logical, Monotonic, Point, Rectangle},
     wayland::{
-        compositor::{self, CompositorClientState, CompositorState},
+        compositor::{CompositorClientState, CompositorState},
         input_method::InputMethodManagerState,
+        keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState,
         output::OutputManagerState,
+        pointer_gestures::PointerGesturesState,
         seat::WaylandFocus,
+        security_context::{SecurityContext, SecurityContextState},
         selection::{
             data_device::DataDeviceState, primary_selection::PrimarySelectionState,
             wlr_data_control::DataControlState,
@@ -40,6 +41,7 @@ use smithay::{
         shm::ShmState,
         single_pixel_buffer::SinglePixelBufferState,
         socket::ListeningSocketSource,
+        tablet_manager::TabletManagerState,
         viewporter::ViewporterState,
         xdg_activation::XdgActivationState,
         xdg_foreign::XdgForeignState,
@@ -58,7 +60,7 @@ use crate::{
     utils::{
         config::Config,
         layout::LayoutBehavior,
-        workspaces::{place_on_center, WindowMode, WindowUserData, Workspaces},
+        workspaces::{place_on_center, WindowMode, Workspaces},
     },
 };
 use crate::{utils::workspaces::is_fullscreen, SERIAL_COUNTER};
@@ -88,6 +90,7 @@ pub struct State {
     pub compositor_state: CompositorState,
     pub pointer_location: Point<f64, Logical>,
     pub socket_name: OsString,
+    pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
 
     pub output_manager_state: OutputManagerState,
 
@@ -105,7 +108,9 @@ pub struct State {
     pub primary_selection_state: PrimarySelectionState,
     pub popup_manager: PopupManager,
     pub layer_shell_state: WlrLayerShellState,
-    pub current_layout: String,
+
+    // input-related fields
+    pub suppressed_keys: Vec<Keysym>,
 
     #[cfg(feature = "xwayland")]
     pub xwayland_shell_state: xwayland_shell::XWaylandShellState,
@@ -139,6 +144,8 @@ impl State {
 
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
 
+        let keyboard_shortcuts_inhibit_state = KeyboardShortcutsInhibitState::new::<Self>(&dh);
+
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let mut seat_state: SeatState<Self> = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
@@ -151,12 +158,7 @@ impl State {
             DataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |_| true);
 
         let config = Config::get_config().unwrap_or_default();
-        let current_layout = config
-            .keyboard
-            .layouts
-            .get(0)
-            .unwrap_or(&"us".to_string())
-            .to_string();
+        let current_layout = config.keyboard.layouts.join(",");
 
         let xkb_config = XkbConfig {
             layout: &current_layout,
@@ -167,7 +169,17 @@ impl State {
         let listening_socket = ListeningSocketSource::new_auto().unwrap();
         let config = Config::get_config().unwrap_or_default();
 
+        TabletManagerState::new::<Self>(&dh);
+
         InputMethodManagerState::new::<Self, _>(&dh, |_client| true);
+
+        PointerGesturesState::new::<Self>(&dh);
+
+        SecurityContextState::new::<Self, _>(&dh, |client| {
+            client
+                .get_data::<ClientState>()
+                .is_none_or(|client_state| client_state.security_context.is_none())
+        });
 
         // Get the name of the listening socket.
         // Clients will connect to this socket.
@@ -226,6 +238,8 @@ impl State {
             xdg_activation_state,
             xdg_foreign_state,
 
+            keyboard_shortcuts_inhibit_state,
+
             shm_state,
             seat_state,
             data_device_state,
@@ -236,7 +250,9 @@ impl State {
             primary_selection_state,
             layer_shell_state,
             config,
-            current_layout,
+
+            // input-related fields
+            suppressed_keys: Vec::new(),
 
             #[cfg(feature = "xwayland")]
             xwayland_shell_state,
@@ -316,12 +332,11 @@ impl State {
         // Iterate top → bottom (important for correct stacking)
         for element in ws.space.elements().rev() {
             if let Some(hit) = self.window_contains_pointer(element) {
-                match element
+                match *element
                     .user_data()
-                    .get::<RefCell<WindowUserData>>()
+                    .get::<RefCell<WindowMode>>()
                     .unwrap()
                     .borrow()
-                    .mode
                 {
                     // Floating windows always win immediately
                     WindowMode::Floating => return Some(hit),
@@ -356,18 +371,7 @@ impl State {
                 .cloned();
 
             if let Some(a) = active {
-                match a
-                    .user_data()
-                    .get::<RefCell<WindowUserData>>()
-                    .unwrap()
-                    .borrow()
-                    .mode
-                {
-                    WindowMode::Floating => {
-                        ws.space.raise_element(&a, false);
-                    }
-                    _ => {}
-                }
+                ws.space.raise_element(&a, true);
                 ws.active_window = Some(a.clone());
             }
             self.set_keyboard_focus(Some(under));
@@ -396,8 +400,8 @@ impl State {
             .elements()
             .filter(|w| {
                 w.user_data()
-                    .get::<RefCell<WindowUserData>>()
-                    .map(|d| d.borrow().mode == WindowMode::Tiled)
+                    .get::<RefCell<WindowMode>>()
+                    .map(|d| *d.borrow() == WindowMode::Tiled)
                     .unwrap_or(false)
             })
             .cloned()
@@ -453,6 +457,7 @@ impl State {
                 }
             }
             if elem.geometry.to_f64().contains(self.pointer_location) {
+                ws.space.raise_element(elem.window, true);
                 active = Some(elem.window.clone())
             }
         }
@@ -462,8 +467,8 @@ impl State {
             .elements()
             .filter(|w| {
                 w.user_data()
-                    .get::<RefCell<WindowUserData>>()
-                    .map(|d| d.borrow().mode == WindowMode::Floating)
+                    .get::<RefCell<WindowMode>>()
+                    .map(|d| *d.borrow() == WindowMode::Floating)
                     .unwrap_or(false)
             })
             .cloned()
@@ -476,6 +481,7 @@ impl State {
                     active = Some(window)
                 }
             } else {
+                place_on_center(&mut ws.space, &window, 0);
             }
         }
 
@@ -522,6 +528,7 @@ impl State {
 #[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    pub security_context: Option<SecurityContext>,
 }
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
